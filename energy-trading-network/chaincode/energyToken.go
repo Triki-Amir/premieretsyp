@@ -856,14 +856,24 @@ func (c *EnergyTokenContract) GetAllTrades(ctx contractapi.TransactionContextInt
 			return nil, err
 		}
 
+		// Skip keys that are clearly not trades (indexes and offers)
+		key := queryResponse.Key
+		if len(key) > 6 && (key[:6] == "email_" || key[:6] == "offer_") {
+			continue
+		}
+		if len(key) > 7 && key[:7] == "fiscal_" {
+			continue
+		}
+
 		var trade EnergyTrade
 		err = json.Unmarshal(queryResponse.Value, &trade)
 		if err != nil {
 			continue
 		}
 
-		// Only include entries that are trades (have TradeID)
-		if trade.TradeID != "" {
+		// Verify this is a valid trade by checking for required trade-specific fields
+		// Trades must have TradeID, SellerID, BuyerID, and Status
+		if trade.TradeID != "" && trade.SellerID != "" && trade.BuyerID != "" && trade.Status != "" {
 			trades = append(trades, &trade)
 		}
 	}

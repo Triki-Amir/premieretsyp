@@ -16,8 +16,6 @@
     "fabric-network": "^2.2.20",
     "fabric-ca-client": "^2.2.20",
     "express": "^4.18.2",
-    "body-parser": "^1.20.2",
-    "cors": "^2.8.5",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.3.1"
   },

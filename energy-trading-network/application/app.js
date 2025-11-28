@@ -8,8 +8,6 @@
  */
 
 const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { Gateway, Wallets } = require('fabric-network');
 const path = require('path');
@@ -36,8 +34,6 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
-app.use(cors());
-app.use(bodyParser.json());
 
 // Configuration
 const PORT = process.env.PORT || 3000;
