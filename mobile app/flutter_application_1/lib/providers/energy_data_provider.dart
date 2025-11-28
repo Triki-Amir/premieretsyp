@@ -76,10 +76,10 @@ class EnergyDataProvider extends ChangeNotifier {
       generation: generation,
       consumption: consumption,
       balance: balance,
-      todayGenerated: (generation * 8).round(), // Simulated daily values
-      todayConsumed: (consumption * 8).round(),
+      todayGenerated: (generation * 8).round().toDouble(), // Simulated daily values
+      todayConsumed: (consumption * 8).round().toDouble(),
       todayTraded: 0,
-      costSavings: (balance * 0.10 * 8).round(),
+      costSavings: (balance * 0.10 * 8).round().toDouble(),
       batteryLevel: ((factory['energy_capacity'] as num?)?.toDouble() ?? 100) * 0.78,
     );
     

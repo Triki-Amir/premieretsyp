@@ -8,7 +8,8 @@ class BackendApiService {
   // For physical devices, use the actual server IP address
   // For Android emulator, use 10.0.2.2 to access host machine's localhost
   // For iOS simulator, localhost works
-  static String _baseUrl = 'http://localhost:5000';
+  static String _baseUrl = 'http://localhost:5000/';
+  static String _baseUrl_blockchain = 'http://localhost:3000/api';
   
   /// Configure the base URL for different environments
   static void setBaseUrl(String url) {
@@ -110,7 +111,7 @@ class BackendApiService {
   Future<List<Map<String, dynamic>>> getAllFactories() async {
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl/factories'))
+          .get(Uri.parse('$_baseUrl_blockchain/factories'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
@@ -128,7 +129,7 @@ class BackendApiService {
   Future<Map<String, dynamic>> getFactory(int factoryId) async {
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl/factory/$factoryId'))
+          .get(Uri.parse('$_baseUrl_blockchain/factory/$factoryId'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
@@ -152,7 +153,7 @@ class BackendApiService {
     try {
       final response = await http
           .put(
-            Uri.parse('$_baseUrl/factory/$factoryId/energy'),
+            Uri.parse('$_baseUrl_blockchain/factory/$factoryId/energy'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'energy_balance': energyBalance,
