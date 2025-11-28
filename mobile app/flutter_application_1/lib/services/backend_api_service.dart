@@ -8,7 +8,7 @@ class BackendApiService {
   // For physical devices, use the actual server IP address
   // For Android emulator, use 10.0.2.2 to access host machine's localhost
   // For iOS simulator, localhost works
-  static String _baseUrl = 'http://localhost:5000/';
+  static String _baseUrl = 'http://localhost:5000';
   static String _baseUrl_blockchain = 'http://localhost:3000/api';
   
   /// Configure the base URL for different environments
