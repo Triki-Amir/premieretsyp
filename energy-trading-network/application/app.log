@@ -1,0 +1,18 @@
+========================================
+   Energy Trading Network API
+========================================
+Server running on http://localhost:3000
+
+Available endpoints:
+  GET  /api/health
+  POST /api/factory/register
+  POST /api/energy/mint
+  POST /api/energy/transfer
+  POST /api/trade/create
+  POST /api/trade/execute
+  GET  /api/factory/:factoryId
+  GET  /api/factory/:factoryId/balance
+  GET  /api/factories
+  GET  /api/trade/:tradeId
+  GET  /api/factory/:factoryId/history
+========================================

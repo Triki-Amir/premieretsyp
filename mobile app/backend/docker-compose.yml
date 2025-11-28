@@ -1,0 +1,48 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: energy-trading-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-energy_trading}
+      MYSQL_USER: ${MYSQL_USER:-energy_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-energy_password}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - energy-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    container_name: energy-trading-backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: mysql
+      DB_USER: ${MYSQL_USER:-energy_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-energy_password}
+      DB_NAME: ${MYSQL_DATABASE:-energy_trading}
+      PORT: 5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - energy-network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  energy-network:
+    driver: bridge

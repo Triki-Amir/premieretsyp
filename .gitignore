@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.rar
+*.zip
+*.exe
+fabric-samples/
+fabric-ca-binaries.tar.gz
+"AI Models/Enery demand Model/""
+"AI Models/Machine Maintenance Prediction Model/"
+"AI Models/Workers-safety-detection/"
