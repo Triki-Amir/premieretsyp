@@ -71,6 +71,45 @@ class EnergyFactory {
       pricePerUnit: 0.10, // Default price, can be customized
     );
   }
+  
+  /// Create factory from backend API response
+  factory EnergyFactory.fromBackend(Map<String, dynamic> json) {
+    final currentGeneration = (json['current_generation'] as num?)?.toDouble() ?? 0.0;
+    final currentConsumption = (json['current_consumption'] as num?)?.toDouble() ?? 0.0;
+    final energyBalance = (json['energy_balance'] as num?)?.toDouble() ?? 0.0;
+    final energyCapacity = (json['energy_capacity'] as num?)?.toDouble() ?? 100.0;
+    
+    // Calculate status based on energy balance
+    FactoryStatus status;
+    if (energyBalance > 0) {
+      status = FactoryStatus.surplus;
+    } else if (energyBalance < 0) {
+      status = FactoryStatus.deficit;
+    } else {
+      status = FactoryStatus.storage;
+    }
+    
+    return EnergyFactory(
+      id: json['id'].toString(),
+      name: json['factory_name'] ?? 'Unknown Factory',
+      location: Location(lat: 40.7128, lng: -74.0060), // Default location
+      distance: 0.0,
+      status: status,
+      capacity: Capacity(
+        solar: energyCapacity * 0.5,
+        wind: energyCapacity * 0.3,
+        battery: energyCapacity * 0.2,
+      ),
+      currentGeneration: currentGeneration,
+      currentConsumption: currentConsumption,
+      balance: energyBalance,
+      energyType: json['energy_source'],
+      dailyConsumption: currentConsumption,
+      availableEnergy: currentGeneration,
+      currencyBalance: 0.0,
+      pricePerUnit: 0.10, // Default price
+    );
+  }
 }
 
 class Location {
