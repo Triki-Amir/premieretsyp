@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'dart:convert';
 import '../services/backend_api_service.dart';
 import '../providers/energy_data_provider.dart';
 

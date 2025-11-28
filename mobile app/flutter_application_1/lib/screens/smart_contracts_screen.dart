@@ -206,31 +206,76 @@ class _SmartContractsScreenState extends State<SmartContractsScreen> {
                   ),
                 ),
               ),
-              SliverList(
-                delegate: SliverChildBuilderDelegate((context, index) {
-                  final offer = offers[index];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+              
+              // Loading indicator
+              if (energyData.isLoadingOffers)
+                const SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(32),
+                      child: CircularProgressIndicator(),
                     ),
-                    child: OfferCardWidget(
-                      offer: offer,
-                      onAction: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Trade initiated with ${offer.factoryName}',
+                  ),
+                ),
+              
+              // Empty state
+              if (!energyData.isLoadingOffers && offers.isEmpty)
+                SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        children: [
+                          Icon(Icons.description_outlined,
+                              size: 64, color: Colors.grey.shade700),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'No offers available',
+                            style: TextStyle(
+                              color: Colors.grey,
+                              fontSize: 16,
                             ),
-                            backgroundColor: Colors.green,
-                            behavior: SnackBarBehavior.floating,
                           ),
-                        );
-                      },
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Create a new offer to get started',
+                            style: TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  );
-                }, childCount: offers.length),
-              ),
+                  ),
+                ),
+              
+              if (!energyData.isLoadingOffers)
+                SliverList(
+                  delegate: SliverChildBuilderDelegate((context, index) {
+                    final offer = offers[index];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: OfferCardWidget(
+                        offer: offer,
+                        onAction: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Trade initiated with ${offer.factoryName}',
+                              ),
+                              backgroundColor: Colors.green,
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                  }, childCount: offers.length),
+                ),
               const SliverToBoxAdapter(child: SizedBox(height: 80)),
             ],
           ),
