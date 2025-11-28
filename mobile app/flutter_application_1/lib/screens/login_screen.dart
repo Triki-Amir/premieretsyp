@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
+import 'package:provider/provider.dart';
+import '../services/backend_api_service.dart';
+import '../providers/energy_data_provider.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback onLogin;
@@ -22,6 +23,8 @@ class _LoginScreenState extends State<LoginScreen> {
   final _energyCapacityController = TextEditingController();
   final _contactInfoController = TextEditingController();
   final _energySourceController = TextEditingController();
+  
+  final BackendApiService _backendApi = BackendApiService();
 
   @override
   void dispose() {
@@ -42,49 +45,43 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final data = {
-        'email': _emailController.text,
-        'password': _passwordController.text,
-      };
-
-      const url = 'http://localhost:5000/login';
       print('Attempting to login with email: ${_emailController.text}');
 
-      final response = await http.post(
-        Uri.parse(url),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(data),
-      ).timeout(const Duration(seconds: 10));
+      final response = await _backendApi.login(
+        _emailController.text,
+        _passwordController.text,
+      );
 
-      print('Received response with status code: ${response.statusCode}');
-      print('Response body: ${response.body}');
+      print('Login response: $response');
 
       if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Login successful!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        // Call onLogin callback to navigate to the app
-        widget.onLogin();
-      } else {
-        final errorData = jsonDecode(response.body);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorData['error'] ?? 'Invalid email or password'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      // Store the factory data in the provider
+      final factory = response['factory'] as Map<String, dynamic>;
+      final provider = context.read<EnergyDataProvider>();
+      provider.setCurrentUserFactory(factory);
+      
+      // Load data from backend
+      await provider.loadFactoriesFromBackend();
+      await provider.loadOffers();
+      await provider.loadTrades();
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Welcome back, ${factory['factory_name']}!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      // Call onLogin callback to navigate to the app
+      widget.onLogin();
     } catch (e) {
       print('An error occurred during login: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('An error occurred: $e'),
+          content: Text('Login failed: ${e.toString().replaceAll('Exception: ', '')}'),
           backgroundColor: Colors.red,
         ),
       );
@@ -103,55 +100,38 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final data = {
-        'factory_name': _factoryNameController.text,
-        'localisation': _localisationController.text,
-        'fiscal_matricule': _fiscalMatriculeController.text,
-        'energy_capacity': int.parse(_energyCapacityController.text),
-        'contact_info': _contactInfoController.text,
-        'energy_source': _energySourceController.text,
-        'email': _emailController.text,
-        'password': _passwordController.text,
-      };
+      print('Attempting to sign up...');
 
-      const url = 'http://localhost:5000/signup';
-      print('Attempting to sign up with data: $data');
-
-      final response = await http.post(
-        Uri.parse(url),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(data),
-      ).timeout(const Duration(seconds: 10));
-
-      print('Received response with status code: ${response.statusCode}');
-      print('Response body: ${response.body}');
+      await _backendApi.signup(
+        factoryName: _factoryNameController.text,
+        email: _emailController.text,
+        password: _passwordController.text,
+        fiscalMatricule: _fiscalMatriculeController.text,
+        localisation: _localisationController.text.isNotEmpty ? _localisationController.text : null,
+        energyCapacity: _energyCapacityController.text.isNotEmpty 
+            ? int.tryParse(_energyCapacityController.text) 
+            : null,
+        contactInfo: _contactInfoController.text.isNotEmpty ? _contactInfoController.text : null,
+        energySource: _energySourceController.text.isNotEmpty ? _energySourceController.text : null,
+      );
 
       if (!mounted) return;
 
-      if (response.statusCode == 201) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Factory registered successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        setState(() {
-          _isLogin = true; // Switch to login screen on success
-        });
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to register factory: ${response.body}'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Factory registered successfully! Please login.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      setState(() {
+        _isLogin = true; // Switch to login screen on success
+      });
     } catch (e) {
       print('An error occurred during sign up: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('An error occurred: $e'),
+          content: Text('Sign up failed: ${e.toString().replaceAll('Exception: ', '')}'),
           backgroundColor: Colors.red,
         ),
       );

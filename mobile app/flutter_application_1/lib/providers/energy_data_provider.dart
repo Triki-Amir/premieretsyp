@@ -5,28 +5,32 @@ import '../models/energy_data.dart';
 import '../models/factory.dart';
 import '../models/energy_offer.dart';
 import '../models/trade.dart';
-import '../services/blockchain_api_service.dart';
+import '../services/backend_api_service.dart';
 
 class EnergyDataProvider extends ChangeNotifier {
-  final BlockchainApiService _blockchainApi = BlockchainApiService();
+  final BackendApiService _backendApi = BackendApiService();
   
   // Connection status
-  bool _isConnectedToBlockchain = false;
+  bool _isConnectedToBackend = false;
   String? _connectionError;
   bool _isLoadingFactories = false;
+  bool _isLoadingOffers = false;
+  bool _isLoadingTrades = false;
+  bool _isSeeding = false;
   
-  // Current user's factory ID (you can set this based on login)
-  String _myFactoryId = 'Factory01'; // Default to Factory01
+  // Current user's factory data from login
+  Map<String, dynamic>? _currentUserFactory;
+  int? _myFactoryId;
   
   CurrentEnergyData _currentData = CurrentEnergyData(
-    generation: 245,
-    consumption: 198,
-    balance: 47,
-    todayGenerated: 1834,
-    todayConsumed: 1567,
-    todayTraded: 423,
-    costSavings: 1247,
-    batteryLevel: 78,
+    generation: 0,
+    consumption: 0,
+    balance: 0,
+    todayGenerated: 0,
+    todayConsumed: 0,
+    todayTraded: 0,
+    costSavings: 0,
+    batteryLevel: 0,
   );
 
   List<EnergyData> _history = [];
@@ -37,9 +41,9 @@ class EnergyDataProvider extends ChangeNotifier {
   Timer? _timer;
 
   EnergyDataProvider() {
-    _initializeData();
+    _initializeHistory();
     _startUpdates();
-    _checkBlockchainConnection();
+    _checkBackendConnection();
   }
 
   // Getters
@@ -48,60 +52,178 @@ class EnergyDataProvider extends ChangeNotifier {
   List<EnergyFactory> get factories => _factories;
   List<EnergyOffer> get offers => _offers;
   List<Trade> get trades => _trades;
-  bool get isConnectedToBlockchain => _isConnectedToBlockchain;
+  bool get isConnectedToBlockchain => _isConnectedToBackend;
+  bool get isConnectedToBackend => _isConnectedToBackend;
   bool get isLoadingFactories => _isLoadingFactories;
+  bool get isLoadingOffers => _isLoadingOffers;
+  bool get isLoadingTrades => _isLoadingTrades;
+  bool get isSeeding => _isSeeding;
   String? get connectionError => _connectionError;
-  String get myFactoryId => _myFactoryId;
+  int? get myFactoryId => _myFactoryId;
+  Map<String, dynamic>? get currentUserFactory => _currentUserFactory;
   
-  /// Set the current user's factory ID
-  void setMyFactoryId(String factoryId) {
-    _myFactoryId = factoryId;
+  /// Set the current user's factory from login response
+  void setCurrentUserFactory(Map<String, dynamic> factory) {
+    _currentUserFactory = factory;
+    _myFactoryId = factory['id'] as int?;
+    
+    // Update current data based on logged-in user's factory
+    final generation = (factory['current_generation'] as num?)?.toDouble() ?? 0;
+    final consumption = (factory['current_consumption'] as num?)?.toDouble() ?? 0;
+    final balance = (factory['energy_balance'] as num?)?.toDouble() ?? 0;
+    
+    _currentData = CurrentEnergyData(
+      generation: generation,
+      consumption: consumption,
+      balance: balance,
+      todayGenerated: (generation * 8).round(), // Simulated daily values
+      todayConsumed: (consumption * 8).round(),
+      todayTraded: 0,
+      costSavings: (balance * 0.10 * 8).round(),
+      batteryLevel: ((factory['energy_capacity'] as num?)?.toDouble() ?? 100) * 0.78,
+    );
+    
     notifyListeners();
   }
   
-  /// Check blockchain connection
-  Future<void> _checkBlockchainConnection() async {
+  /// Clear user session on logout
+  void clearSession() {
+    _currentUserFactory = null;
+    _myFactoryId = null;
+    _factories = [];
+    _offers = [];
+    _trades = [];
+    _isConnectedToBackend = false;
+    notifyListeners();
+  }
+  
+  /// Check backend connection
+  Future<void> _checkBackendConnection() async {
     try {
-      await _blockchainApi.checkHealth();
-      _isConnectedToBlockchain = true;
+      await _backendApi.testConnection();
+      _isConnectedToBackend = true;
       _connectionError = null;
-      
-      // Load factories from blockchain
-      await loadFactoriesFromBlockchain();
-      
       notifyListeners();
     } catch (e) {
-      _isConnectedToBlockchain = false;
+      _isConnectedToBackend = false;
       _connectionError = e.toString();
-      debugPrint('Blockchain connection error: $e');
-      // Fall back to demo data
-      _initializeData();
+      debugPrint('Backend connection error: $e');
       notifyListeners();
     }
   }
   
-  /// Load factories from blockchain
+  /// Load factories from backend
   Future<void> loadFactoriesFromBlockchain() async {
+    return loadFactoriesFromBackend();
+  }
+  
+  Future<void> loadFactoriesFromBackend() async {
     _isLoadingFactories = true;
     notifyListeners();
     
     try {
-      final factoriesData = await _blockchainApi.getAllFactories();
+      final factoriesData = await _backendApi.getAllFactories();
       
       if (factoriesData.isNotEmpty) {
         _factories = factoriesData
-            .map((json) => EnergyFactory.fromBlockchain(json))
+            .where((json) {
+              // Ensure type-safe comparison - convert both to int if possible
+              final jsonId = json['id'];
+              if (jsonId == null || _myFactoryId == null) return true;
+              if (jsonId is int) return jsonId != _myFactoryId;
+              if (jsonId is String) return int.tryParse(jsonId) != _myFactoryId;
+              return true;
+            }) // Exclude current user's factory
+            .map((json) => EnergyFactory.fromBackend(json))
             .toList();
-        _isConnectedToBlockchain = true;
+        _isConnectedToBackend = true;
         _connectionError = null;
+      } else {
+        _factories = [];
       }
     } catch (e) {
       _connectionError = e.toString();
-      debugPrint('Error loading factories from blockchain: $e');
-      // Keep using demo data if blockchain fails
+      debugPrint('Error loading factories from backend: $e');
     } finally {
       _isLoadingFactories = false;
       notifyListeners();
+    }
+  }
+  
+  /// Load offers from backend
+  Future<void> loadOffers() async {
+    _isLoadingOffers = true;
+    notifyListeners();
+    
+    try {
+      final offersData = await _backendApi.getAllOffers();
+      
+      _offers = offersData.map((json) {
+        return EnergyOffer(
+          id: json['id'].toString(),
+          factoryId: json['factory_id'].toString(),
+          factoryName: json['factory_name'] ?? 'Unknown Factory',
+          type: json['offer_type'] == 'sell' ? OfferType.sell : OfferType.buy,
+          kWh: (json['energy_amount'] as num).toDouble(),
+          pricePerKWh: (json['price_per_kwh'] as num).toDouble(),
+          distance: 0.0, // Distance not stored in backend
+          timestamp: DateTime.parse(json['created_at'] ?? DateTime.now().toIso8601String()),
+        );
+      }).toList();
+      
+      _isConnectedToBackend = true;
+    } catch (e) {
+      debugPrint('Error loading offers from backend: $e');
+    } finally {
+      _isLoadingOffers = false;
+      notifyListeners();
+    }
+  }
+  
+  /// Load trades from backend
+  Future<void> loadTrades() async {
+    _isLoadingTrades = true;
+    notifyListeners();
+    
+    try {
+      final tradesData = await _backendApi.getTrades(factoryId: _myFactoryId);
+      
+      _trades = tradesData.map((json) {
+        final isSeller = json['seller_factory_id'] == _myFactoryId;
+        return Trade(
+          id: json['id'].toString(),
+          type: isSeller ? TradeType.sell : TradeType.buy,
+          factoryName: isSeller ? json['buyer_name'] : json['seller_name'],
+          kWh: (json['energy_amount'] as num).toDouble(),
+          pricePerKWh: (json['price_per_kwh'] as num).toDouble(),
+          totalPrice: (json['total_price'] as num).toDouble(),
+          status: _mapTradeStatus(json['status']),
+          timestamp: DateTime.parse(json['created_at'] ?? DateTime.now().toIso8601String()),
+          profitLoss: isSeller ? (json['total_price'] as num).toDouble() : -(json['total_price'] as num).toDouble(),
+        );
+      }).toList();
+      
+      _isConnectedToBackend = true;
+    } catch (e) {
+      debugPrint('Error loading trades from backend: $e');
+    } finally {
+      _isLoadingTrades = false;
+      notifyListeners();
+    }
+  }
+  
+  TradeStatus _mapTradeStatus(String? status) {
+    switch (status) {
+      case 'pending':
+        return TradeStatus.pending;
+      case 'active':
+        return TradeStatus.active;
+      case 'completed':
+        return TradeStatus.completed;
+      case 'cancelled':
+        return TradeStatus.cancelled;
+      default:
+        return TradeStatus.pending;
     }
   }
   
@@ -111,19 +233,26 @@ class EnergyDataProvider extends ChangeNotifier {
     required double amount,
     required double pricePerUnit,
   }) async {
+    if (_myFactoryId == null) {
+      throw Exception('User not logged in');
+    }
+    
+    final sellerId = int.tryParse(sellerFactoryId);
+    if (sellerId == null) {
+      throw Exception('Invalid seller factory ID');
+    }
+    
     try {
-      final tradeId = 'trade_${DateTime.now().millisecondsSinceEpoch}';
-      
-      final result = await _blockchainApi.createTrade(
-        tradeId: tradeId,
-        sellerId: sellerFactoryId,
-        buyerId: _myFactoryId,
-        amount: amount,
-        pricePerUnit: pricePerUnit,
+      final result = await _backendApi.createTrade(
+        sellerFactoryId: sellerId,
+        buyerFactoryId: _myFactoryId!,
+        energyAmount: amount,
+        pricePerKwh: pricePerUnit,
       );
       
-      // Reload factories to update balances
-      await loadFactoriesFromBlockchain();
+      // Reload data to update balances
+      await loadFactoriesFromBackend();
+      await loadTrades();
       
       return result;
     } catch (e) {
@@ -137,19 +266,26 @@ class EnergyDataProvider extends ChangeNotifier {
     required double amount,
     required double pricePerUnit,
   }) async {
+    if (_myFactoryId == null) {
+      throw Exception('User not logged in');
+    }
+    
+    final buyerId = int.tryParse(buyerFactoryId);
+    if (buyerId == null) {
+      throw Exception('Invalid buyer factory ID');
+    }
+    
     try {
-      final tradeId = 'trade_${DateTime.now().millisecondsSinceEpoch}';
-      
-      final result = await _blockchainApi.createTrade(
-        tradeId: tradeId,
-        sellerId: _myFactoryId,
-        buyerId: buyerFactoryId,
-        amount: amount,
-        pricePerUnit: pricePerUnit,
+      final result = await _backendApi.createTrade(
+        sellerFactoryId: _myFactoryId!,
+        buyerFactoryId: buyerId,
+        energyAmount: amount,
+        pricePerKwh: pricePerUnit,
       );
       
-      // Reload factories to update balances
-      await loadFactoriesFromBlockchain();
+      // Reload data to update balances
+      await loadFactoriesFromBackend();
+      await loadTrades();
       
       return result;
     } catch (e) {
@@ -157,17 +293,55 @@ class EnergyDataProvider extends ChangeNotifier {
     }
   }
   
-  /// Get energy status for a specific factory
-  Future<Map<String, dynamic>> getEnergyStatus(String factoryId) async {
+  /// Create a new offer
+  Future<void> createOffer({
+    required String offerType,
+    required double energyAmount,
+    required double pricePerKwh,
+  }) async {
+    if (_myFactoryId == null) {
+      throw Exception('User not logged in');
+    }
+    
     try {
-      return await _blockchainApi.getEnergyStatus(factoryId);
+      await _backendApi.createOffer(
+        factoryId: _myFactoryId!,
+        offerType: offerType,
+        energyAmount: energyAmount,
+        pricePerKwh: pricePerKwh,
+      );
+      
+      // Reload offers
+      await loadOffers();
     } catch (e) {
-      throw Exception('Failed to get energy status: $e');
+      throw Exception('Failed to create offer: $e');
+    }
+  }
+  
+  /// Seed the database with sample data
+  Future<Map<String, dynamic>> seedDatabase() async {
+    _isSeeding = true;
+    notifyListeners();
+    
+    try {
+      final result = await _backendApi.seedDatabase();
+      
+      // Reload all data after seeding
+      await loadFactoriesFromBackend();
+      await loadOffers();
+      await loadTrades();
+      
+      return result;
+    } catch (e) {
+      throw Exception('Failed to seed database: $e');
+    } finally {
+      _isSeeding = false;
+      notifyListeners();
     }
   }
 
-  void _initializeData() {
-    // Initialize history data (keep real-time simulation)
+  void _initializeHistory() {
+    // Initialize history data for charts
     final now = DateTime.now();
     for (int i = 23; i >= 0; i--) {
       final hour = now.subtract(Duration(hours: i));
@@ -181,146 +355,24 @@ class EnergyDataProvider extends ChangeNotifier {
         battery: baseGen * 0.1,
       ));
     }
-
-    // Initialize demo factories (will be replaced by blockchain data if available)
-    if (_factories.isEmpty) {
-      _factories = [
-        EnergyFactory(
-          id: 'f1',
-          name: 'Factory 2',
-          location: Location(lat: 40.7128, lng: -74.0060),
-          distance: 2.3,
-          status: FactoryStatus.surplus,
-          capacity: Capacity(solar: 500, wind: 300, battery: 200),
-          currentGeneration: 320,
-          currentConsumption: 250,
-          balance: 70,
-          pricePerUnit: 0.09,
-        ),
-        EnergyFactory(
-          id: 'f2',
-          name: 'Factory 3',
-          location: Location(lat: 40.7580, lng: -73.9855),
-          distance: 5.7,
-          status: FactoryStatus.deficit,
-          capacity: Capacity(solar: 400, wind: 200, battery: 150),
-          currentGeneration: 180,
-          currentConsumption: 230,
-          balance: -50,
-          pricePerUnit: 0.13,
-        ),
-        EnergyFactory(
-          id: 'f3',
-          name: 'Factory 4',
-          location: Location(lat: 40.7489, lng: -73.9680),
-          distance: 8.1,
-          status: FactoryStatus.storage,
-          capacity: Capacity(solar: 600, wind: 400, battery: 300),
-          currentGeneration: 280,
-          currentConsumption: 270,
-          balance: 10,
-          pricePerUnit: 0.11,
-        ),
-        EnergyFactory(
-          id: 'f4',
-          name: 'Factory 5',
-          location: Location(lat: 40.7614, lng: -73.9776),
-          distance: 12.4,
-          status: FactoryStatus.surplus,
-          capacity: Capacity(solar: 450, wind: 250, battery: 180),
-          currentGeneration: 380,
-          currentConsumption: 290,
-          balance: 90,
-          pricePerUnit: 0.08,
-        ),
-      ];
-    }
-
-    // Initialize offers
-    _offers = [
-      EnergyOffer(
-        id: 'o1',
-        factoryId: 'f1',
-        factoryName: 'Factory 2',
-        type: OfferType.sell,
-        kWh: 70,
-        pricePerKWh: 0.09,
-        distance: 2.3,
-        timestamp: DateTime.now(),
-      ),
-      EnergyOffer(
-        id: 'o2',
-        factoryId: 'f2',
-        factoryName: 'Factory 3',
-        type: OfferType.buy,
-        kWh: 50,
-        pricePerKWh: 0.13,
-        distance: 5.7,
-        timestamp: DateTime.now(),
-      ),
-      EnergyOffer(
-        id: 'o3',
-        factoryId: 'f4',
-        factoryName: 'Factory 5',
-        type: OfferType.sell,
-        kWh: 90,
-        pricePerKWh: 0.08,
-        distance: 12.4,
-        timestamp: DateTime.now(),
-      ),
-    ];
-
-    // Initialize trades
-    _trades = [
-      Trade(
-        id: 't1',
-        type: TradeType.buy,
-        factoryName: 'Factory 2',
-        kWh: 30,
-        pricePerKWh: 0.09,
-        totalPrice: 2.7,
-        status: TradeStatus.active,
-        timestamp: DateTime.now().subtract(const Duration(minutes: 15)),
-      ),
-      Trade(
-        id: 't2',
-        type: TradeType.sell,
-        factoryName: 'Factory 5',
-        kWh: 45,
-        pricePerKWh: 0.12,
-        totalPrice: 5.4,
-        status: TradeStatus.completed,
-        timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-        profitLoss: 1.2,
-      ),
-      Trade(
-        id: 't3',
-        type: TradeType.buy,
-        factoryName: 'Factory 3',
-        kWh: 25,
-        pricePerKWh: 0.11,
-        totalPrice: 2.75,
-        status: TradeStatus.completed,
-        timestamp: DateTime.now().subtract(const Duration(hours: 5)),
-        profitLoss: -0.5,
-      ),
-    ];
   }
 
   void _startUpdates() {
     _timer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      final random = Random();
-      _currentData = CurrentEnergyData(
-        generation: max(0, _currentData.generation + (random.nextDouble() - 0.5) * 20),
-        consumption: max(0, _currentData.consumption + (random.nextDouble() - 0.5) * 15),
-        balance: _currentData.generation - _currentData.consumption,
-        todayGenerated: _currentData.todayGenerated,
-        todayConsumed: _currentData.todayConsumed,
-        todayTraded: _currentData.todayTraded,
-        costSavings: _currentData.costSavings,
-        batteryLevel: min(100, max(0, _currentData.batteryLevel + (random.nextDouble() - 0.5) * 5)),
-      );
-      notifyListeners();
+      if (_currentUserFactory != null) {
+        final random = Random();
+        _currentData = CurrentEnergyData(
+          generation: max(0, _currentData.generation + (random.nextDouble() - 0.5) * 20),
+          consumption: max(0, _currentData.consumption + (random.nextDouble() - 0.5) * 15),
+          balance: _currentData.generation - _currentData.consumption,
+          todayGenerated: _currentData.todayGenerated,
+          todayConsumed: _currentData.todayConsumed,
+          todayTraded: _currentData.todayTraded,
+          costSavings: _currentData.costSavings,
+          batteryLevel: min(100, max(0, _currentData.batteryLevel + (random.nextDouble() - 0.5) * 5)),
+        );
+        notifyListeners();
+      }
     });
   }
 

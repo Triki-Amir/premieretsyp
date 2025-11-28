@@ -45,14 +45,14 @@ class _MyFactoryScreenState extends State<MyFactoryScreen> with SingleTickerProv
                   children: [
                     const Icon(Icons.factory, color: Colors.blue),
                     const SizedBox(width: 8),
-                    const Column(
+                    Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Factory 1',
-                          style: TextStyle(fontSize: 18, color: Colors.white),
+                          energyData.currentUserFactory?['factory_name'] ?? 'My Factory',
+                          style: const TextStyle(fontSize: 18, color: Colors.white),
                         ),
-                        Text(
+                        const Text(
                           'My Factory Overview',
                           style: TextStyle(fontSize: 10, color: Colors.grey),
                         ),
@@ -76,7 +76,7 @@ class _MyFactoryScreenState extends State<MyFactoryScreen> with SingleTickerProv
                 child: TabBarView(
                   controller: _tabController,
                   children: [
-                    _buildOverviewTab(current),
+                    _buildOverviewTab(current, energyData),
                     _buildMachinesTab(),
                     _buildImpactTab(),
                   ],
@@ -89,7 +89,10 @@ class _MyFactoryScreenState extends State<MyFactoryScreen> with SingleTickerProv
     );
   }
 
-  Widget _buildOverviewTab(dynamic current) {
+  Widget _buildOverviewTab(dynamic current, EnergyDataProvider energyData) {
+    final factory = energyData.currentUserFactory;
+    final energySource = factory?['energy_source'] ?? 'Mixed';
+    
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [

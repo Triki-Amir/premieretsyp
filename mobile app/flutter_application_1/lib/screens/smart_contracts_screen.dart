@@ -1,15 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 import '../providers/energy_data_provider.dart';
 import '../widgets/offer_card.dart';
 import '../models/energy_offer.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 
-class SmartContractsScreen extends StatelessWidget {
+class SmartContractsScreen extends StatefulWidget {
   final Function(String) onNavigate;
 
   const SmartContractsScreen({super.key, required this.onNavigate});
+
+  @override
+  State<SmartContractsScreen> createState() => _SmartContractsScreenState();
+}
+
+class _SmartContractsScreenState extends State<SmartContractsScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Load offers when screen loads
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<EnergyDataProvider>().loadOffers();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,6 +60,12 @@ class SmartContractsScreen extends StatelessWidget {
                 ),
                 actions: [
                   IconButton(
+                    icon: const Icon(Icons.refresh),
+                    onPressed: energyData.isLoadingOffers
+                        ? null
+                        : () => energyData.loadOffers(),
+                  ),
+                  IconButton(
                     icon: const Icon(Icons.add, color: Colors.blue),
                     onPressed: () {
                       _showCreateOfferDialog(context);
@@ -54,6 +73,28 @@ class SmartContractsScreen extends StatelessWidget {
                   ),
                 ],
               ),
+              
+              // Connection status banner
+              if (!energyData.isConnectedToBackend)
+                SliverToBoxAdapter(
+                  child: Container(
+                    color: Colors.orange.shade900,
+                    padding: const EdgeInsets.all(12),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.warning, color: Colors.white),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Not connected to backend. Showing cached data.',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -165,31 +206,76 @@ class SmartContractsScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              SliverList(
-                delegate: SliverChildBuilderDelegate((context, index) {
-                  final offer = offers[index];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+              
+              // Loading indicator
+              if (energyData.isLoadingOffers)
+                const SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(32),
+                      child: CircularProgressIndicator(),
                     ),
-                    child: OfferCardWidget(
-                      offer: offer,
-                      onAction: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Trade initiated with ${offer.factoryName}',
+                  ),
+                ),
+              
+              // Empty state
+              if (!energyData.isLoadingOffers && offers.isEmpty)
+                SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        children: [
+                          Icon(Icons.description_outlined,
+                              size: 64, color: Colors.grey.shade700),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'No offers available',
+                            style: TextStyle(
+                              color: Colors.grey,
+                              fontSize: 16,
                             ),
-                            backgroundColor: Colors.green,
-                            behavior: SnackBarBehavior.floating,
                           ),
-                        );
-                      },
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Create a new offer to get started',
+                            style: TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  );
-                }, childCount: offers.length),
-              ),
+                  ),
+                ),
+              
+              if (!energyData.isLoadingOffers)
+                SliverList(
+                  delegate: SliverChildBuilderDelegate((context, index) {
+                    final offer = offers[index];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: OfferCardWidget(
+                        offer: offer,
+                        onAction: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Trade initiated with ${offer.factoryName}',
+                              ),
+                              backgroundColor: Colors.green,
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                  }, childCount: offers.length),
+                ),
               const SliverToBoxAdapter(child: SizedBox(height: 80)),
             ],
           ),
@@ -199,43 +285,14 @@ class SmartContractsScreen extends StatelessWidget {
   }
 
   void _showCreateOfferDialog(BuildContext context) {
-    final factoryNameController = TextEditingController(text: 'Factory 1');
-    final factoryIdController = TextEditingController(text: 'F-001');
     final amountController = TextEditingController();
     final priceController = TextEditingController();
-    String selectedEnergyType = 'Solar';
-    String selectedOfferType = 'Sell';
-
-    Future<void> createOffer() async {
-      try {
-        final response = await http.post(
-          Uri.parse('http://localhost:3000/api/factory/register'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'factoryId': factoryIdController.text,
-            'name': factoryNameController.text,
-            'initialBalance': double.parse(priceController.text),
-            'energyType': selectedEnergyType.toLowerCase(),
-          }),
-        );
-
-        if (response.statusCode == 201 || response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          if (data['success']) {
-            print('Offer created successfully');
-          }
-        } else {
-          print('Failed to create offer');
-        }
-      } catch (e) {
-        print('Error: $e');
-      }
-    }
+    String selectedOfferType = 'sell';
 
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) {
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
           return AlertDialog(
             backgroundColor: Colors.grey.shade900,
             title: const Text(
@@ -247,34 +304,6 @@ class SmartContractsScreen extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  TextField(
-                    controller: factoryNameController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'Factory Name',
-                      labelStyle: const TextStyle(color: Colors.grey),
-                      filled: true,
-                      fillColor: Colors.grey.shade800,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: factoryIdController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'Factory ID',
-                      labelStyle: const TextStyle(color: Colors.grey),
-                      filled: true,
-                      fillColor: Colors.grey.shade800,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
                   const Text(
                     'Offer Type',
                     style: TextStyle(color: Colors.grey, fontSize: 14),
@@ -291,63 +320,15 @@ class SmartContractsScreen extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                       ),
                     ),
-                    items: ['Sell', 'Buy'].map((String value) {
-                      return DropdownMenuItem<String>(
-                        value: value,
-                        child: Text(value),
-                      );
-                    }).toList(),
+                    items: [
+                      const DropdownMenuItem(value: 'sell', child: Text('Sell Energy')),
+                      const DropdownMenuItem(value: 'buy', child: Text('Buy Energy')),
+                    ],
                     onChanged: (String? newValue) {
                       setDialogState(() {
                         selectedOfferType = newValue!;
                       });
                     },
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Energy Type',
-                    style: TextStyle(color: Colors.grey, fontSize: 14),
-                  ),
-                  const SizedBox(height: 8),
-                  DropdownButtonFormField<String>(
-                    value: selectedEnergyType,
-                    style: const TextStyle(color: Colors.white),
-                    dropdownColor: Colors.grey.shade800,
-                    decoration: InputDecoration(
-                      filled: true,
-                      fillColor: Colors.grey.shade800,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    items: ['Solar', 'Wind', 'Footstep', 'Mixed'].map((
-                      String value,
-                    ) {
-                      return DropdownMenuItem<String>(
-                        value: value,
-                        child: Text(value),
-                      );
-                    }).toList(),
-                    onChanged: (String? newValue) {
-                      setDialogState(() {
-                        selectedEnergyType = newValue!;
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: priceController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'Price per kWh (\$)',
-                      labelStyle: const TextStyle(color: Colors.grey),
-                      filled: true,
-                      fillColor: Colors.grey.shade800,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    keyboardType: TextInputType.number,
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -365,45 +346,77 @@ class SmartContractsScreen extends StatelessWidget {
                     keyboardType: TextInputType.number,
                   ),
                   const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.green.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.green.withOpacity(0.3)),
+                  TextField(
+                    controller: priceController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Price per kWh (\$)',
+                      labelStyle: const TextStyle(color: Colors.grey),
+                      filled: true,
+                      fillColor: Colors.grey.shade800,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.bolt, color: Colors.green, size: 20),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'Energy Balance:',
-                          style: TextStyle(color: Colors.grey, fontSize: 14),
-                        ),
-                        const SizedBox(width: 8),
-                        const Text(
-                          '+125 kWh',
-                          style: TextStyle(
-                            color: Colors.green,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
+                    keyboardType: TextInputType.number,
                   ),
                 ],
               ),
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context),
+                onPressed: () => Navigator.pop(dialogContext),
                 child: const Text('Cancel'),
               ),
               ElevatedButton(
-                onPressed: () {
-                  createOffer();
-                  Navigator.pop(context);
+                onPressed: () async {
+                  if (amountController.text.isEmpty || priceController.text.isEmpty) {
+                    Fluttertoast.showToast(
+                      msg: "Please fill all fields",
+                      backgroundColor: Colors.red,
+                    );
+                    return;
+                  }
+                  
+                  try {
+                    final amount = double.tryParse(amountController.text);
+                    final price = double.tryParse(priceController.text);
+                    
+                    if (amount == null || price == null) {
+                      Fluttertoast.showToast(
+                        msg: "Please enter valid numbers",
+                        backgroundColor: Colors.red,
+                      );
+                      return;
+                    }
+                    
+                    final provider = context.read<EnergyDataProvider>();
+                    await provider.createOffer(
+                      offerType: selectedOfferType,
+                      energyAmount: amount,
+                      pricePerKwh: price,
+                    );
+                    
+                    Navigator.pop(dialogContext);
+                    
+                    Fluttertoast.showToast(
+                      msg: "✅ Offer created successfully!",
+                      backgroundColor: Colors.green,
+                    );
+                  } catch (e) {
+                    String errorMessage = e.toString();
+                    // Clean up common exception prefixes
+                    const prefixes = ['Exception: ', 'Error: '];
+                    for (final prefix in prefixes) {
+                      if (errorMessage.startsWith(prefix)) {
+                        errorMessage = errorMessage.substring(prefix.length);
+                      }
+                    }
+                    Fluttertoast.showToast(
+                      msg: "❌ $errorMessage",
+                      backgroundColor: Colors.red,
+                    );
+                  }
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.blue.shade600,
