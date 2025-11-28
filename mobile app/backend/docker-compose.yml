@@ -1,47 +1,30 @@
+# NOTE: This docker-compose.yml is DEPRECATED
+# The mobile app backend has been merged with the blockchain application.
+# The unified application is located at: energy-trading-network/application/app.js
+# 
+# MySQL is NO LONGER USED - all data is stored in CouchDB via Hyperledger Fabric
+# The CouchDB instances (couchdb0 and couchdb1) are started by the blockchain network.
+#
+# To start the application:
+# 1. Start the blockchain network: cd energy-trading-network/network && ./startNetwork.sh
+# 2. Deploy chaincode: ./deployChaincode.sh
+# 3. Start the unified app: cd ../application && npm install && npm start
+#
+# This file is kept for reference only and should not be used.
+
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: energy-trading-mysql
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-energy_trading}
-      MYSQL_USER: ${MYSQL_USER:-energy_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-energy_password}
-    ports:
-      - "3307:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    networks:
-      - energy-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  backend:
-    build: .
-    container_name: energy-trading-backend
-    restart: unless-stopped
-    environment:
-      DB_HOST: mysql
-      DB_USER: ${MYSQL_USER:-energy_user}
-      DB_PASSWORD: ${MYSQL_PASSWORD:-energy_password}
-      DB_NAME: ${MYSQL_DATABASE:-energy_trading}
-      PORT: 5000
-    ports:
-      - "5000:5000"
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - energy-network
-
-volumes:
-  mysql_data:
-    driver: local
+  # MySQL has been removed - using CouchDB via Hyperledger Fabric instead
+  # The backend has been merged with the blockchain application
+  
+  app-info:
+    image: alpine:latest
+    container_name: deprecated-notice
+    command: >
+      echo "NOTICE: This docker-compose is deprecated. 
+      The mobile backend has been merged with the blockchain application.
+      Please use: energy-trading-network/application/app.js
+      Database: CouchDB via Hyperledger Fabric (couchdb0, couchdb1)"
+    restart: "no"
 
 networks:
   energy-network:

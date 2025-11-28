@@ -1,19 +1,41 @@
 /**
  * Energy Trading Application
- * Main application for factories to interact with the blockchain
- * Provides REST API endpoints for energy token operations
+ * Unified application for factories to interact with the blockchain
+ * Provides REST API endpoints for energy token operations and mobile app authentication
+ * 
+ * This application uses CouchDB (via Hyperledger Fabric) as the only database.
+ * No MySQL is required - all data is stored on the blockchain ledger (couchdb0 and couchdb1).
  */
 
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const { Gateway, Wallets } = require('fabric-network');
 const path = require('path');
 const fs = require('fs');
+require('dotenv').config();
 
 // Initialize Express application
 const app = express();
 
+// CORS configuration - must be before other middleware
+app.use((req, res, next) => {
+    console.log(`Incoming request: ${req.method} ${req.url} from ${req.headers.origin || 'unknown origin'}`);
+    
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+        console.log('Handling OPTIONS preflight request');
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+app.use(express.json());
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -38,6 +60,27 @@ function parseResult(result, defaultValue = null) {
 }
 
 /**
+ * Generate a unique factory ID
+ */
+function generateFactoryId() {
+    return 'Factory_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+}
+
+/**
+ * Generate a unique offer ID
+ */
+function generateOfferId() {
+    return 'Offer_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+}
+
+/**
+ * Generate a unique trade ID
+ */
+function generateTradeId() {
+    return 'Trade_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+}
+
+/**
  * Get network connection and contract
  * @param {string} factoryId - Factory identifier for wallet lookup
  * @returns {Object} Contract instance
@@ -45,18 +88,18 @@ function parseResult(result, defaultValue = null) {
 async function getContract(factoryId = 'admin') {
     try {
         // Load connection profile
-const ccpPath = path.resolve(
-    __dirname,
-    '..', '..',              
-    'fabric-samples',
-    'test-network',
-    'organizations',
-    'peerOrganizations',
-    'org1.example.com',
-    'connection-org1.json'
-);
+        const ccpPath = path.resolve(
+            __dirname,
+            '..', '..',              
+            'fabric-samples',
+            'test-network',
+            'organizations',
+            'peerOrganizations',
+            'org1.example.com',
+            'connection-org1.json'
+        );
 
-const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
+        const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
 
         // Create wallet instance
         const walletPath = path.join(process.cwd(), 'wallet');
@@ -88,15 +131,14 @@ const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
     }
 }
 
-/**
- * API Routes
- */
+// ==================== HEALTH CHECK ====================
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ 
         status: 'OK', 
-        message: 'Energy Trading API is running',
+        message: 'Energy Trading API is running (CouchDB only - no MySQL)',
+        database: 'CouchDB via Hyperledger Fabric (couchdb0, couchdb1)',
         timestamp: new Date().toISOString()
     });
 });
@@ -549,6 +591,578 @@ app.get('/api/factory/:factoryId/history', async (req, res) => {
     }
 });
 
+// ==================== MOBILE APP AUTHENTICATION ENDPOINTS ====================
+
+// Simple test endpoint (for mobile app compatibility)
+app.get('/test', (req, res) => {
+    console.log('Test endpoint hit!');
+    res.json({ message: 'Backend is working! (CouchDB only - no MySQL)' });
+});
+
+/**
+ * Login Endpoint - Authenticate factory user
+ * POST /login
+ * Body: { email, password }
+ */
+app.post('/login', async (req, res) => {
+    console.log('Received login request with email:', req.body.email);
+    try {
+        const { email, password } = req.body;
+
+        // Basic validation
+        if (!email || !password) {
+            console.log('Login failed: Email or password missing.');
+            return res.status(400).send({ error: 'Email and password are required.' });
+        }
+
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Get factory by email from CouchDB via chaincode
+        let factory;
+        try {
+            const result = await contract.evaluateTransaction('GetFactoryByEmail', email);
+            factory = parseResult(result, null);
+        } catch (err) {
+            await gateway.disconnect();
+            console.log('Login failed: Email not found.');
+            return res.status(401).send({ error: 'Invalid email or password.' });
+        }
+
+        await gateway.disconnect();
+
+        if (!factory) {
+            console.log('Login failed: Email not found.');
+            return res.status(401).send({ error: 'Invalid email or password.' });
+        }
+
+        // Compare password with hashed password
+        const isPasswordValid = await bcrypt.compare(password, factory.passwordHash || '');
+
+        if (!isPasswordValid) {
+            console.log('Login failed: Invalid password.');
+            return res.status(401).send({ error: 'Invalid email or password.' });
+        }
+
+        console.log('Login successful for:', email);
+        res.status(200).send({ 
+            message: 'Login successful!',
+            factory: {
+                id: factory.id,
+                factory_name: factory.name,
+                email: factory.email,
+                localisation: factory.localisation,
+                fiscal_matricule: factory.fiscalMatricule,
+                energy_capacity: factory.energyCapacity,
+                contact_info: factory.contactInfo,
+                energy_source: factory.energyType,
+                energy_balance: factory.energyBalance || 0,
+                current_generation: factory.currentGeneration || 0,
+                current_consumption: factory.currentConsumption || 0
+            }
+        });
+
+    } catch (error) {
+        console.error('Error during login:', error);
+        res.status(500).send({ error: 'Failed to login due to a server error.' });
+    }
+});
+
+/**
+ * Sign-Up Endpoint - Register new factory with authentication
+ * POST /signup
+ * Body: { factory_name, localisation, fiscal_matricule, energy_capacity, contact_info, energy_source, email, password }
+ */
+app.post('/signup', async (req, res) => {
+    console.log('Received signup request with body:', req.body);
+    try {
+        const {
+            factory_name,
+            localisation,
+            fiscal_matricule,
+            energy_capacity,
+            contact_info,
+            energy_source,
+            email,
+            password
+        } = req.body;
+
+        // Basic validation
+        if (!email || !password || !factory_name || !fiscal_matricule) {
+            console.log('Signup failed: Required fields missing.');
+            return res.status(400).send({ error: 'Required fields are missing.' });
+        }
+
+        // Password validation: minimum 8 characters, at least one letter and one number
+        if (password.length < 8) {
+            console.log('Signup failed: Password too short.');
+            return res.status(400).send({ error: 'Password must be at least 8 characters long.' });
+        }
+        if (!/(?=.*[a-zA-Z])(?=.*[0-9])/.test(password)) {
+            console.log('Signup failed: Password must contain letters and numbers.');
+            return res.status(400).send({ error: 'Password must contain at least one letter and one number.' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Generate unique factory ID
+        const factoryId = generateFactoryId();
+
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Register factory with authentication via chaincode (stored in CouchDB)
+        try {
+            await contract.submitTransaction(
+                'RegisterFactoryWithAuth',
+                factoryId,
+                factory_name,
+                email,
+                hashedPassword,
+                localisation || '',
+                fiscal_matricule,
+                (energy_capacity || 0).toString(),
+                contact_info || '',
+                energy_source || '',
+                '0', // initialBalance
+                '0'  // currencyBalance
+            );
+        } catch (err) {
+            await gateway.disconnect();
+            if (err.message.includes('already registered') || err.message.includes('already exists')) {
+                return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
+            }
+            throw err;
+        }
+
+        await gateway.disconnect();
+
+        console.log('Factory registered successfully:', email);
+        res.status(201).send({ 
+            message: 'Factory registered successfully!',
+            factoryId: factoryId
+        });
+
+    } catch (error) {
+        console.error('Error during signup:', error);
+        res.status(500).send({ error: 'Failed to register factory due to a server error.' });
+    }
+});
+
+// ==================== MOBILE APP FACTORIES ENDPOINTS ====================
+
+/**
+ * Get all factories (mobile app format)
+ * GET /factories
+ */
+app.get('/factories', async (req, res) => {
+    console.log('Fetching all factories');
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Query all factories from CouchDB via chaincode
+        const result = await contract.evaluateTransaction('GetAllFactories');
+        const factories = parseResult(result, []);
+
+        await gateway.disconnect();
+
+        // Transform to mobile app format
+        const transformedFactories = factories.map(f => ({
+            id: f.id,
+            factory_name: f.name,
+            localisation: f.localisation,
+            fiscal_matricule: f.fiscalMatricule,
+            energy_capacity: f.energyCapacity,
+            contact_info: f.contactInfo,
+            energy_source: f.energyType,
+            email: f.email,
+            energy_balance: f.energyBalance,
+            current_generation: f.currentGeneration,
+            current_consumption: f.currentConsumption,
+            created_at: f.createdAt
+        }));
+        
+        res.status(200).json({ 
+            success: true,
+            data: transformedFactories 
+        });
+    } catch (error) {
+        console.error('Error fetching factories:', error);
+        res.status(500).json({ error: 'Failed to fetch factories.' });
+    }
+});
+
+/**
+ * Get a single factory by ID (mobile app format)
+ * GET /factory/:id
+ */
+app.get('/factory/:id', async (req, res) => {
+    const { id } = req.params;
+    console.log('Fetching factory with ID:', id);
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Query factory from CouchDB via chaincode
+        let factory;
+        try {
+            const result = await contract.evaluateTransaction('GetFactory', id);
+            factory = parseResult(result, null);
+        } catch (err) {
+            await gateway.disconnect();
+            return res.status(404).json({ error: 'Factory not found.' });
+        }
+
+        await gateway.disconnect();
+
+        if (!factory) {
+            return res.status(404).json({ error: 'Factory not found.' });
+        }
+
+        // Transform to mobile app format
+        res.status(200).json({ 
+            success: true,
+            data: {
+                id: factory.id,
+                factory_name: factory.name,
+                localisation: factory.localisation,
+                fiscal_matricule: factory.fiscalMatricule,
+                energy_capacity: factory.energyCapacity,
+                contact_info: factory.contactInfo,
+                energy_source: factory.energyType,
+                email: factory.email,
+                energy_balance: factory.energyBalance,
+                current_generation: factory.currentGeneration,
+                current_consumption: factory.currentConsumption,
+                created_at: factory.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching factory:', error);
+        res.status(500).json({ error: 'Failed to fetch factory.' });
+    }
+});
+
+/**
+ * Update factory energy data (mobile app format)
+ * PUT /factory/:id/energy
+ * Body: { energy_balance, current_generation, current_consumption }
+ */
+app.put('/factory/:id/energy', async (req, res) => {
+    const { id } = req.params;
+    const { energy_balance, current_generation, current_consumption } = req.body;
+    
+    console.log('Updating energy data for factory:', id);
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Update factory energy via chaincode (stored in CouchDB)
+        await contract.submitTransaction(
+            'UpdateFactoryEnergy',
+            id,
+            (energy_balance || 0).toString(),
+            (current_generation || 0).toString(),
+            (current_consumption || 0).toString()
+        );
+
+        await gateway.disconnect();
+        
+        res.status(200).json({ 
+            success: true,
+            message: 'Factory energy data updated successfully.' 
+        });
+    } catch (error) {
+        console.error('Error updating factory energy:', error);
+        res.status(500).json({ error: 'Failed to update factory energy data.' });
+    }
+});
+
+// ==================== MOBILE APP OFFERS ENDPOINTS ====================
+
+/**
+ * Get all offers (mobile app format)
+ * GET /offers
+ */
+app.get('/offers', async (req, res) => {
+    console.log('Fetching all offers');
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Query all offers from CouchDB via chaincode
+        const offersResult = await contract.evaluateTransaction('GetAllOffers');
+        const offers = parseResult(offersResult, []);
+
+        // Get all factories to join data
+        const factoriesResult = await contract.evaluateTransaction('GetAllFactories');
+        const factories = parseResult(factoriesResult, []);
+        const factoryMap = {};
+        factories.forEach(f => { factoryMap[f.id] = f; });
+
+        await gateway.disconnect();
+
+        // Transform to mobile app format with factory details
+        const transformedOffers = offers.map(o => {
+            const factory = factoryMap[o.factoryId] || {};
+            return {
+                id: o.id,
+                factory_id: o.factoryId,
+                offer_type: o.offerType,
+                energy_amount: o.energyAmount,
+                price_per_kwh: o.pricePerKwh,
+                status: o.status,
+                created_at: o.createdAt,
+                updated_at: o.updatedAt,
+                factory_name: factory.name,
+                energy_source: factory.energyType,
+                localisation: factory.localisation
+            };
+        });
+        
+        res.status(200).json({ 
+            success: true,
+            data: transformedOffers 
+        });
+    } catch (error) {
+        console.error('Error fetching offers:', error);
+        res.status(500).json({ error: 'Failed to fetch offers.' });
+    }
+});
+
+/**
+ * Create a new offer (mobile app format)
+ * POST /offers
+ * Body: { factory_id, offer_type, energy_amount, price_per_kwh }
+ */
+app.post('/offers', async (req, res) => {
+    console.log('Creating new offer:', req.body);
+    try {
+        const { factory_id, offer_type, energy_amount, price_per_kwh } = req.body;
+
+        if (!factory_id || !offer_type || !energy_amount || !price_per_kwh) {
+            return res.status(400).json({ error: 'All fields are required.' });
+        }
+
+        // Generate unique offer ID
+        const offerId = generateOfferId();
+
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Create offer via chaincode (stored in CouchDB)
+        await contract.submitTransaction(
+            'CreateOffer',
+            offerId,
+            factory_id,
+            offer_type,
+            energy_amount.toString(),
+            price_per_kwh.toString()
+        );
+
+        await gateway.disconnect();
+        
+        res.status(201).json({ 
+            success: true,
+            message: 'Offer created successfully.',
+            offerId: offerId
+        });
+    } catch (error) {
+        console.error('Error creating offer:', error);
+        res.status(500).json({ error: 'Failed to create offer.' });
+    }
+});
+
+/**
+ * Update offer status (mobile app format)
+ * PUT /offers/:id
+ * Body: { status }
+ */
+app.put('/offers/:id', async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+    
+    console.log('Updating offer status:', id, status);
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Update offer status via chaincode (stored in CouchDB)
+        await contract.submitTransaction('UpdateOfferStatus', id, status);
+
+        await gateway.disconnect();
+        
+        res.status(200).json({ 
+            success: true,
+            message: 'Offer updated successfully.' 
+        });
+    } catch (error) {
+        console.error('Error updating offer:', error);
+        res.status(500).json({ error: 'Failed to update offer.' });
+    }
+});
+
+// ==================== MOBILE APP TRADES ENDPOINTS ====================
+
+/**
+ * Get all trades (mobile app format)
+ * GET /trades
+ */
+app.get('/trades', async (req, res) => {
+    const { factory_id } = req.query;
+    console.log('Fetching trades, factory_id:', factory_id);
+    
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Query all trades from CouchDB via chaincode
+        const tradesResult = await contract.evaluateTransaction('GetAllTrades');
+        let trades = parseResult(tradesResult, []);
+
+        // Get all factories to join data
+        const factoriesResult = await contract.evaluateTransaction('GetAllFactories');
+        const factories = parseResult(factoriesResult, []);
+        const factoryMap = {};
+        factories.forEach(f => { factoryMap[f.id] = f; });
+
+        await gateway.disconnect();
+
+        // Filter by factory_id if provided
+        if (factory_id) {
+            trades = trades.filter(t => t.sellerId === factory_id || t.buyerId === factory_id);
+        }
+
+        // Transform to mobile app format with factory names
+        const transformedTrades = trades.map(t => {
+            const seller = factoryMap[t.sellerId] || {};
+            const buyer = factoryMap[t.buyerId] || {};
+            return {
+                id: t.tradeId,
+                seller_factory_id: t.sellerId,
+                buyer_factory_id: t.buyerId,
+                energy_amount: t.amount,
+                price_per_kwh: t.pricePerUnit,
+                total_price: t.totalPrice,
+                status: t.status,
+                created_at: t.timestamp,
+                completed_at: t.status === 'completed' ? t.timestamp : null,
+                seller_name: seller.name,
+                buyer_name: buyer.name
+            };
+        });
+        
+        res.status(200).json({ 
+            success: true,
+            data: transformedTrades 
+        });
+    } catch (error) {
+        console.error('Error fetching trades:', error);
+        res.status(500).json({ error: 'Failed to fetch trades.' });
+    }
+});
+
+/**
+ * Create a new trade (mobile app format)
+ * POST /trades
+ * Body: { seller_factory_id, buyer_factory_id, energy_amount, price_per_kwh }
+ */
+app.post('/trades', async (req, res) => {
+    console.log('Creating new trade:', req.body);
+    try {
+        const { seller_factory_id, buyer_factory_id, energy_amount, price_per_kwh } = req.body;
+
+        if (!seller_factory_id || !buyer_factory_id || !energy_amount || !price_per_kwh) {
+            return res.status(400).json({ error: 'All fields are required.' });
+        }
+
+        // Generate unique trade ID
+        const tradeId = generateTradeId();
+
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Create trade via chaincode (stored in CouchDB)
+        await contract.submitTransaction(
+            'CreateEnergyTrade',
+            tradeId,
+            seller_factory_id,
+            buyer_factory_id,
+            energy_amount.toString(),
+            price_per_kwh.toString()
+        );
+
+        await gateway.disconnect();
+        
+        res.status(201).json({ 
+            success: true,
+            message: 'Trade created successfully.',
+            tradeId: tradeId 
+        });
+    } catch (error) {
+        console.error('Error creating trade:', error);
+        res.status(500).json({ error: 'Failed to create trade.' });
+    }
+});
+
+/**
+ * Execute/complete a trade (mobile app format)
+ * POST /trades/:id/execute
+ */
+app.post('/trades/:id/execute', async (req, res) => {
+    const { id } = req.params;
+    console.log('Executing trade:', id);
+    
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Execute trade via chaincode (updates CouchDB)
+        await contract.submitTransaction('ExecuteTrade', id);
+
+        await gateway.disconnect();
+        
+        res.status(200).json({ 
+            success: true,
+            message: 'Trade executed successfully.' 
+        });
+    } catch (error) {
+        console.error('Error executing trade:', error);
+        res.status(500).json({ error: 'Failed to execute trade.' });
+    }
+});
+
+// ==================== SEED ENDPOINT ====================
+
+/**
+ * Seed the database with sample data (for testing)
+ * POST /seed
+ */
+app.post('/seed', async (req, res) => {
+    console.log('Seeding database with sample data (CouchDB via blockchain)...');
+    
+    try {
+        // Connect to network
+        const { contract, gateway } = await getContract();
+
+        // Initialize ledger with sample factories via chaincode
+        await contract.submitTransaction('InitLedger');
+
+        await gateway.disconnect();
+
+        res.status(200).json({ 
+            success: true,
+            message: 'Database seeded successfully via blockchain (CouchDB)!'
+        });
+
+    } catch (error) {
+        console.error('Error seeding database:', error);
+        res.status(500).json({ error: 'Failed to seed database.' });
+    }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error(err.stack);
@@ -556,19 +1170,34 @@ app.use((err, req, res, next) => {
 });
 
 // Start server (capture server to handle errors)
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
     console.log('   Energy Trading Network API');
+    console.log('   (Unified Mobile + Blockchain)');
     console.log('========================================');
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Also accessible at http://127.0.0.1:${PORT}`);
+    console.log('');
+    console.log('Database: CouchDB via Hyperledger Fabric');
+    console.log('         (couchdb0 and couchdb1 only - no MySQL)');
     console.log('');
     console.log('Available endpoints:');
+    console.log('');
+    console.log('  HEALTH:');
     console.log('  GET  /api/health');
+    console.log('  GET  /test');
+    console.log('');
+    console.log('  AUTHENTICATION (Mobile App):');
+    console.log('  POST /login');
+    console.log('  POST /signup');
+    console.log('');
+    console.log('  FACTORIES (Mobile App format):');
+    console.log('  GET  /factories');
+    console.log('  GET  /factory/:id');
+    console.log('  PUT  /factory/:id/energy');
+    console.log('');
+    console.log('  FACTORIES (Blockchain format):');
     console.log('  POST /api/factory/register');
-    console.log('  POST /api/energy/mint');
-    console.log('  POST /api/energy/transfer');
-    console.log('  POST /api/trade/create');
-    console.log('  POST /api/trade/execute');
     console.log('  GET  /api/factory/:factoryId');
     console.log('  GET  /api/factory/:factoryId/balance');
     console.log('  GET  /api/factory/:factoryId/available-energy');
@@ -576,10 +1205,32 @@ const server = app.listen(PORT, () => {
     console.log('  PUT  /api/factory/:factoryId/available-energy');
     console.log('  PUT  /api/factory/:factoryId/daily-consumption');
     console.log('  GET  /api/factories');
-    console.log('  GET  /api/trade/:tradeId');
     console.log('  GET  /api/factory/:factoryId/history');
+    console.log('');
+    console.log('  ENERGY TOKENS:');
+    console.log('  POST /api/energy/mint');
+    console.log('  POST /api/energy/transfer');
+    console.log('');
+    console.log('  OFFERS (Mobile App):');
+    console.log('  GET  /offers');
+    console.log('  POST /offers');
+    console.log('  PUT  /offers/:id');
+    console.log('');
+    console.log('  TRADES (Mobile App format):');
+    console.log('  GET  /trades');
+    console.log('  POST /trades');
+    console.log('  POST /trades/:id/execute');
+    console.log('');
+    console.log('  TRADES (Blockchain format):');
+    console.log('  POST /api/trade/create');
+    console.log('  POST /api/trade/execute');
+    console.log('  GET  /api/trade/:tradeId');
+    console.log('');
+    console.log('  SEED:');
+    console.log('  POST /seed');
     console.log('========================================');
 });
+
 server.on('error', (err) => {
     if (err && err.code === 'EADDRINUSE') {
         console.error(`Port ${PORT} already in use. Start the app with a different PORT or stop the process using this port.`);

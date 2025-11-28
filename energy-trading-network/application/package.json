@@ -1,14 +1,15 @@
 {
   "name": "energy-trading-app",
   "version": "1.0.0",
-  "description": "Application for factories to trade energy on the blockchain",
+  "description": "Unified application for factories to trade energy on the blockchain (Mobile + Blockchain)",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
+    "dev": "nodemon app.js",
     "enroll": "node enrollAdmin.js",
     "register": "node registerFactory.js"
   },
-  "keywords": ["blockchain", "hyperledger", "fabric", "energy", "trading"],
+  "keywords": ["blockchain", "hyperledger", "fabric", "energy", "trading", "mobile", "couchdb"],
   "author": "Energy Trading Zone",
   "license": "Apache-2.0",
   "dependencies": {
@@ -16,6 +17,11 @@
     "fabric-ca-client": "^2.2.20",
     "express": "^4.18.2",
     "body-parser": "^1.20.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
   }
 }

@@ -17,13 +17,34 @@ type EnergyTokenContract struct {
 
 // Factory - Represents a factory in the industrial zone
 type Factory struct {
-	ID               string  `json:"id"`               // Factory identifier (e.g., "Factory01")
-	Name             string  `json:"name"`             // Factory name
-	EnergyBalance    float64 `json:"energyBalance"`    // Energy tokens balance (in kWh)
-	EnergyType       string  `json:"energyType"`       // Type of energy source (solar, wind, footstep)
-	CurrencyBalance  float64 `json:"currencyBalance"`  // Balance in TEC (Tunisian Energy Coin)
-	DailyConsumption float64 `json:"dailyConsumption"` // Daily energy consumption in kWh
-	AvailableEnergy  float64 `json:"availableEnergy"`  // Currently available energy in kWh
+	ID                 string  `json:"id"`                           // Factory identifier (e.g., "Factory01")
+	Name               string  `json:"name"`                         // Factory name
+	EnergyBalance      float64 `json:"energyBalance"`                // Energy tokens balance (in kWh)
+	EnergyType         string  `json:"energyType"`                   // Type of energy source (solar, wind, footstep)
+	CurrencyBalance    float64 `json:"currencyBalance"`              // Balance in TEC (Tunisian Energy Coin)
+	DailyConsumption   float64 `json:"dailyConsumption"`             // Daily energy consumption in kWh
+	AvailableEnergy    float64 `json:"availableEnergy"`              // Currently available energy in kWh
+	Email              string  `json:"email,omitempty"`              // Factory email for authentication
+	PasswordHash       string  `json:"passwordHash,omitempty"`       // Hashed password for authentication
+	Localisation       string  `json:"localisation,omitempty"`       // Factory location
+	FiscalMatricule    string  `json:"fiscalMatricule,omitempty"`    // Fiscal registration number
+	EnergyCapacity     float64 `json:"energyCapacity,omitempty"`     // Maximum energy capacity
+	ContactInfo        string  `json:"contactInfo,omitempty"`        // Contact information
+	CurrentGeneration  float64 `json:"currentGeneration,omitempty"`  // Current energy generation
+	CurrentConsumption float64 `json:"currentConsumption,omitempty"` // Current energy consumption
+	CreatedAt          string  `json:"createdAt,omitempty"`          // Creation timestamp
+}
+
+// Offer - Represents an energy offer in the marketplace
+type Offer struct {
+	ID           string  `json:"id"`           // Offer identifier
+	FactoryID    string  `json:"factoryId"`    // Factory creating the offer
+	OfferType    string  `json:"offerType"`    // Type of offer (buy/sell)
+	EnergyAmount float64 `json:"energyAmount"` // Amount of energy
+	PricePerKwh  float64 `json:"pricePerKwh"`  // Price per kWh
+	Status       string  `json:"status"`       // Offer status (active, completed, cancelled)
+	CreatedAt    string  `json:"createdAt"`    // Creation timestamp
+	UpdatedAt    string  `json:"updatedAt"`    // Last update timestamp
 }
 
 // EnergyTrade - Represents an energy trade transaction
@@ -568,6 +589,286 @@ func (c *EnergyTokenContract) GetFactoryHistory(ctx contractapi.TransactionConte
 	}
 
 	return string(historyJSON), nil
+}
+
+// RegisterFactoryWithAuth - Register a new factory with authentication credentials
+func (c *EnergyTokenContract) RegisterFactoryWithAuth(ctx contractapi.TransactionContextInterface,
+	factoryID string, name string, email string, passwordHash string, localisation string,
+	fiscalMatricule string, energyCapacity float64, contactInfo string, energySource string,
+	initialBalance float64, currencyBalance float64) error {
+
+	// Check if factory already exists
+	exists, err := c.FactoryExists(ctx, factoryID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("factory %s already exists", factoryID)
+	}
+
+	// Check if email is already registered
+	emailKey := "email_" + email
+	existingFactory, err := ctx.GetStub().GetState(emailKey)
+	if err != nil {
+		return fmt.Errorf("failed to check email: %v", err)
+	}
+	if existingFactory != nil {
+		return fmt.Errorf("email %s is already registered", email)
+	}
+
+	// Check if fiscal matricule is already registered
+	fiscalKey := "fiscal_" + fiscalMatricule
+	existingFiscal, err := ctx.GetStub().GetState(fiscalKey)
+	if err != nil {
+		return fmt.Errorf("failed to check fiscal matricule: %v", err)
+	}
+	if existingFiscal != nil {
+		return fmt.Errorf("fiscal matricule %s is already registered", fiscalMatricule)
+	}
+
+	// Get timestamp
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return err
+	}
+
+	// Create new factory with authentication
+	factory := Factory{
+		ID:                 factoryID,
+		Name:               name,
+		EnergyBalance:      initialBalance,
+		EnergyType:         energySource,
+		CurrencyBalance:    currencyBalance,
+		DailyConsumption:   0,
+		AvailableEnergy:    initialBalance,
+		Email:              email,
+		PasswordHash:       passwordHash,
+		Localisation:       localisation,
+		FiscalMatricule:    fiscalMatricule,
+		EnergyCapacity:     energyCapacity,
+		ContactInfo:        contactInfo,
+		CurrentGeneration:  0,
+		CurrentConsumption: 0,
+		CreatedAt:          txTimestamp.String(),
+	}
+
+	// Marshal factory to JSON
+	factoryJSON, err := json.Marshal(factory)
+	if err != nil {
+		return err
+	}
+
+	// Save factory to ledger
+	err = ctx.GetStub().PutState(factoryID, factoryJSON)
+	if err != nil {
+		return err
+	}
+
+	// Create email index for login lookup
+	err = ctx.GetStub().PutState(emailKey, []byte(factoryID))
+	if err != nil {
+		return err
+	}
+
+	// Create fiscal matricule index
+	err = ctx.GetStub().PutState(fiscalKey, []byte(factoryID))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// GetFactoryByEmail - Get factory ID by email for authentication
+func (c *EnergyTokenContract) GetFactoryByEmail(ctx contractapi.TransactionContextInterface,
+	email string) (*Factory, error) {
+
+	emailKey := "email_" + email
+	factoryIDBytes, err := ctx.GetStub().GetState(emailKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read email index: %v", err)
+	}
+	if factoryIDBytes == nil {
+		return nil, fmt.Errorf("no factory found with email %s", email)
+	}
+
+	factoryID := string(factoryIDBytes)
+	return c.GetFactory(ctx, factoryID)
+}
+
+// UpdateFactoryEnergy - Update energy-related fields of a factory
+func (c *EnergyTokenContract) UpdateFactoryEnergy(ctx contractapi.TransactionContextInterface,
+	factoryID string, energyBalance float64, currentGeneration float64, currentConsumption float64) error {
+
+	factory, err := c.GetFactory(ctx, factoryID)
+	if err != nil {
+		return err
+	}
+
+	factory.EnergyBalance = energyBalance
+	factory.CurrentGeneration = currentGeneration
+	factory.CurrentConsumption = currentConsumption
+
+	factoryJSON, err := json.Marshal(factory)
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().PutState(factoryID, factoryJSON)
+}
+
+// CreateOffer - Create a new energy offer
+func (c *EnergyTokenContract) CreateOffer(ctx contractapi.TransactionContextInterface,
+	offerID string, factoryID string, offerType string, energyAmount float64, pricePerKwh float64) error {
+
+	// Verify factory exists
+	_, err := c.GetFactory(ctx, factoryID)
+	if err != nil {
+		return err
+	}
+
+	// Check if offer already exists
+	offerKey := "offer_" + offerID
+	existingOffer, err := ctx.GetStub().GetState(offerKey)
+	if err != nil {
+		return fmt.Errorf("failed to read offer: %v", err)
+	}
+	if existingOffer != nil {
+		return fmt.Errorf("offer %s already exists", offerID)
+	}
+
+	// Get timestamp
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return err
+	}
+
+	offer := Offer{
+		ID:           offerID,
+		FactoryID:    factoryID,
+		OfferType:    offerType,
+		EnergyAmount: energyAmount,
+		PricePerKwh:  pricePerKwh,
+		Status:       "active",
+		CreatedAt:    txTimestamp.String(),
+		UpdatedAt:    txTimestamp.String(),
+	}
+
+	offerJSON, err := json.Marshal(offer)
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().PutState(offerKey, offerJSON)
+}
+
+// GetOffer - Get an offer by ID
+func (c *EnergyTokenContract) GetOffer(ctx contractapi.TransactionContextInterface,
+	offerID string) (*Offer, error) {
+
+	offerKey := "offer_" + offerID
+	offerJSON, err := ctx.GetStub().GetState(offerKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read offer: %v", err)
+	}
+	if offerJSON == nil {
+		return nil, fmt.Errorf("offer %s does not exist", offerID)
+	}
+
+	var offer Offer
+	err = json.Unmarshal(offerJSON, &offer)
+	if err != nil {
+		return nil, err
+	}
+
+	return &offer, nil
+}
+
+// UpdateOfferStatus - Update the status of an offer
+func (c *EnergyTokenContract) UpdateOfferStatus(ctx contractapi.TransactionContextInterface,
+	offerID string, status string) error {
+
+	offer, err := c.GetOffer(ctx, offerID)
+	if err != nil {
+		return err
+	}
+
+	// Get timestamp
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return err
+	}
+
+	offer.Status = status
+	offer.UpdatedAt = txTimestamp.String()
+
+	offerKey := "offer_" + offerID
+	offerJSON, err := json.Marshal(offer)
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().PutState(offerKey, offerJSON)
+}
+
+// GetAllOffers - Get all active offers
+func (c *EnergyTokenContract) GetAllOffers(ctx contractapi.TransactionContextInterface) ([]*Offer, error) {
+	resultsIterator, err := ctx.GetStub().GetStateByRange("offer_", "offer_~")
+	if err != nil {
+		return nil, err
+	}
+	defer resultsIterator.Close()
+
+	var offers []*Offer
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		var offer Offer
+		err = json.Unmarshal(queryResponse.Value, &offer)
+		if err != nil {
+			continue
+		}
+
+		// Only include active offers
+		if offer.Status == "active" {
+			offers = append(offers, &offer)
+		}
+	}
+
+	return offers, nil
+}
+
+// GetAllTrades - Get all trades (optionally filtered by factory)
+func (c *EnergyTokenContract) GetAllTrades(ctx contractapi.TransactionContextInterface) ([]*EnergyTrade, error) {
+	resultsIterator, err := ctx.GetStub().GetStateByRange("", "")
+	if err != nil {
+		return nil, err
+	}
+	defer resultsIterator.Close()
+
+	var trades []*EnergyTrade
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		var trade EnergyTrade
+		err = json.Unmarshal(queryResponse.Value, &trade)
+		if err != nil {
+			continue
+		}
+
+		// Only include entries that are trades (have TradeID)
+		if trade.TradeID != "" {
+			trades = append(trades, &trade)
+		}
+	}
+
+	return trades, nil
 }
 
 func main() {
