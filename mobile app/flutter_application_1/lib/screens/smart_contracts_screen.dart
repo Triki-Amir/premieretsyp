@@ -379,11 +379,22 @@ class _SmartContractsScreenState extends State<SmartContractsScreen> {
                   }
                   
                   try {
+                    final amount = double.tryParse(amountController.text);
+                    final price = double.tryParse(priceController.text);
+                    
+                    if (amount == null || price == null) {
+                      Fluttertoast.showToast(
+                        msg: "Please enter valid numbers",
+                        backgroundColor: Colors.red,
+                      );
+                      return;
+                    }
+                    
                     final provider = context.read<EnergyDataProvider>();
                     await provider.createOffer(
                       offerType: selectedOfferType,
-                      energyAmount: double.parse(amountController.text),
-                      pricePerKwh: double.parse(priceController.text),
+                      energyAmount: amount,
+                      pricePerKwh: price,
                     );
                     
                     Navigator.pop(dialogContext);
@@ -393,8 +404,16 @@ class _SmartContractsScreenState extends State<SmartContractsScreen> {
                       backgroundColor: Colors.green,
                     );
                   } catch (e) {
+                    String errorMessage = e.toString();
+                    // Clean up common exception prefixes
+                    const prefixes = ['Exception: ', 'Error: '];
+                    for (final prefix in prefixes) {
+                      if (errorMessage.startsWith(prefix)) {
+                        errorMessage = errorMessage.substring(prefix.length);
+                      }
+                    }
                     Fluttertoast.showToast(
-                      msg: "❌ Error: ${e.toString().replaceAll('Exception: ', '')}",
+                      msg: "❌ $errorMessage",
                       backgroundColor: Colors.red,
                     );
                   }

@@ -5,7 +5,18 @@ import 'package:http/http.dart' as http;
 /// Service class for communicating with the backend API
 class BackendApiService {
   // Base URL for the backend - configurable for different environments
-  static const String _baseUrl = 'http://localhost:5000';
+  // For physical devices, use the actual server IP address
+  // For Android emulator, use 10.0.2.2 to access host machine's localhost
+  // For iOS simulator, localhost works
+  static String _baseUrl = 'http://localhost:5000';
+  
+  /// Configure the base URL for different environments
+  static void setBaseUrl(String url) {
+    _baseUrl = url;
+  }
+  
+  /// Get the current base URL
+  static String get baseUrl => _baseUrl;
   
   static const Duration timeout = Duration(seconds: 15);
 

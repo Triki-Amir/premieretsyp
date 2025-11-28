@@ -92,8 +92,8 @@ async function initializeTables() {
                 ALTER TABLE factories ADD COLUMN IF NOT EXISTS energy_balance DECIMAL(10, 2) DEFAULT 0
             `);
         } catch (err) {
-            // Column might already exist, ignore the error
-            if (!err.message.includes('Duplicate column')) {
+            // Column might already exist, ignore ER_DUP_FIELDNAME error
+            if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
                 console.log('Note: energy_balance column handling:', err.message);
             }
         }
@@ -104,7 +104,7 @@ async function initializeTables() {
                 ALTER TABLE factories ADD COLUMN IF NOT EXISTS current_generation DECIMAL(10, 2) DEFAULT 0
             `);
         } catch (err) {
-            if (!err.message.includes('Duplicate column')) {
+            if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
                 console.log('Note: current_generation column handling:', err.message);
             }
         }
@@ -115,7 +115,7 @@ async function initializeTables() {
                 ALTER TABLE factories ADD COLUMN IF NOT EXISTS current_consumption DECIMAL(10, 2) DEFAULT 0
             `);
         } catch (err) {
-            if (!err.message.includes('Duplicate column')) {
+            if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
                 console.log('Note: current_consumption column handling:', err.message);
             }
         }
