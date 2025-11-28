@@ -1,209 +1,103 @@
-# Docker Setup for Energy Trading Backend
+# ⚠️ DEPRECATED - Mobile Backend Has Been Merged
 
-This backend application has been containerized with Docker and uses MySQL as the database. Everything runs in containers for easy deployment and development.
+**IMPORTANT:** This Docker setup is **DEPRECATED**. The mobile app backend has been merged with the blockchain application.
 
-## Prerequisites
+## New Architecture
 
-- Docker Desktop installed and running
-- Docker Compose installed (included with Docker Desktop)
+The mobile backend functionality has been unified with the blockchain application located at:
 
-## Quick Start
+```
+energy-trading-network/application/app.js
+```
 
-### 1. Configure Environment Variables
+### Database Change
 
-Copy the example environment file and customize if needed:
+- **OLD:** MySQL (docker container)
+- **NEW:** CouchDB via Hyperledger Fabric (couchdb0 and couchdb1)
+
+All factory data, user authentication, offers, and trades are now stored on the blockchain ledger, which uses CouchDB as its state database.
+
+## How to Run the Unified Application
+
+### 1. Start the Blockchain Network
 
 ```bash
-cp .env.example .env
+cd energy-trading-network/network
+./startNetwork.sh
 ```
 
-Edit `.env` to set your own passwords (optional but recommended for production):
+This starts the Hyperledger Fabric network including:
+- Orderer
+- Peer nodes
+- CouchDB instances (couchdb0 at port 5984, couchdb1 at port 7984)
 
-```env
-MYSQL_ROOT_PASSWORD=your_secure_root_password
-MYSQL_DATABASE=energy_trading
-MYSQL_USER=energy_user
-MYSQL_PASSWORD=your_secure_password
-```
-
-### 2. Start the Application
-
-Run the following command in the backend directory:
+### 2. Deploy the Chaincode
 
 ```bash
-docker-compose up -d
+./deployChaincode.sh
 ```
 
-This will:
-- Pull the MySQL 8.0 image
-- Build the Node.js backend image
-- Start both containers
-- Automatically create the database and tables from `energy_trading_schema.sql`
-
-### 3. Verify Everything is Running
-
-Check the status of containers:
+### 3. Start the Unified Application
 
 ```bash
-docker-compose ps
+cd ../application
+npm install
+npm start
 ```
 
-You should see both `energy-trading-mysql` and `energy-trading-backend` running.
-
-### 4. Test the API
-
-The backend will be available at `http://localhost:5000`
-
-Test endpoint:
-```bash
-curl http://localhost:5000/test
-```
-
-## Available Commands
-
-### Start the containers
-```bash
-docker-compose up -d
-```
-
-### Stop the containers
-```bash
-docker-compose down
-```
-
-### Stop and remove all data (including database)
-```bash
-docker-compose down -v
-```
-
-### View logs
-```bash
-# All logs
-docker-compose logs
-
-# Backend logs only
-docker-compose logs backend
-
-# MySQL logs only
-docker-compose logs mysql
-
-# Follow logs in real-time
-docker-compose logs -f
-```
-
-### Restart containers
-```bash
-docker-compose restart
-```
-
-### Rebuild the backend image (after code changes)
-```bash
-docker-compose up -d --build
-```
+The unified application runs on port 3000 (configurable via PORT environment variable).
 
 ## API Endpoints
 
-### Test Endpoint
-- **GET** `/test`
-- Returns: `{"message": "Backend is working!"}`
+The unified application supports all endpoints from both the original blockchain app and the mobile backend:
 
-### Sign Up
-- **POST** `/signup`
-- Body:
-  ```json
-  {
-    "factory_name": "Factory Name",
-    "localisation": "Location",
-    "fiscal_matricule": "123456789",
-    "energy_capacity": 1000,
-    "contact_info": "contact@factory.com",
-    "energy_source": "solar",
-    "email": "factory@example.com",
-    "password": "SecurePass123"
-  }
-  ```
+### Authentication (Mobile App)
+- **POST** `/login` - Login with email and password
+- **POST** `/signup` - Register new factory with authentication
 
-### Login
-- **POST** `/login`
-- Body:
-  ```json
-  {
-    "email": "factory@example.com",
-    "password": "SecurePass123"
-  }
-  ```
+### Factories (Mobile App Format)
+- **GET** `/factories` - List all factories
+- **GET** `/factory/:id` - Get factory by ID
+- **PUT** `/factory/:id/energy` - Update factory energy data
 
-## Architecture
+### Factories (Blockchain Format)
+- **POST** `/api/factory/register` - Register factory
+- **GET** `/api/factory/:factoryId` - Get factory details
+- **GET** `/api/factories` - List all factories
 
-### Services
+### Offers (Mobile App)
+- **GET** `/offers` - List all active offers
+- **POST** `/offers` - Create new offer
+- **PUT** `/offers/:id` - Update offer status
 
-1. **MySQL Container** (`mysql`)
-   - Image: `mysql:8.0`
-   - Port: `3306`
-   - Database is automatically initialized with schema on first run
-   - Data is persisted in a Docker volume
+### Trades (Mobile App Format)
+- **GET** `/trades` - List all trades
+- **POST** `/trades` - Create new trade
+- **POST** `/trades/:id/execute` - Execute trade
 
-2. **Backend Container** (`backend`)
-   - Built from local Dockerfile
-   - Port: `5000`
-   - Connects to MySQL using the service name `mysql` as hostname
-   - Waits for MySQL to be healthy before starting
+### Trades (Blockchain Format)
+- **POST** `/api/trade/create` - Create trade
+- **POST** `/api/trade/execute` - Execute trade
+- **GET** `/api/trade/:tradeId` - Get trade details
 
-### Network
+### Energy Tokens
+- **POST** `/api/energy/mint` - Mint energy tokens
+- **POST** `/api/energy/transfer` - Transfer energy
 
-Both containers are connected via a custom Docker network (`energy-network`), allowing them to communicate using service names.
+### Utility
+- **GET** `/api/health` - Health check
+- **GET** `/test` - Simple test endpoint
+- **POST** `/seed` - Seed database with sample data
 
-### Data Persistence
+## Access CouchDB Admin
 
-MySQL data is stored in a Docker volume named `mysql_data`, which persists even if containers are stopped or removed (unless you use `docker-compose down -v`).
+- CouchDB Org1: http://localhost:5984/_utils/ (admin/adminpw)
+- CouchDB Org2: http://localhost:7984/_utils/ (admin/adminpw)
 
-## Troubleshooting
+## Why This Change?
 
-### Backend can't connect to database
-
-Wait a few seconds for MySQL to fully initialize, then restart the backend:
-```bash
-docker-compose restart backend
-```
-
-### Check if MySQL is ready
-```bash
-docker-compose exec mysql mysqladmin ping -h localhost -u root -p
-```
-
-### Access MySQL directly
-```bash
-docker-compose exec mysql mysql -u energy_user -p energy_trading
-```
-(Password: `energy_password` by default)
-
-### Reset everything
-```bash
-docker-compose down -v
-docker-compose up -d
-```
-
-## Development
-
-To make changes to the backend code:
-
-1. Edit the files locally
-2. Rebuild and restart: `docker-compose up -d --build`
-3. Check logs: `docker-compose logs -f backend`
-
-## Production Deployment
-
-For production:
-
-1. Change all default passwords in `.env`
-2. Use proper secrets management
-3. Configure proper CORS settings
-4. Add HTTPS/SSL termination
-5. Use Docker secrets or environment variable injection from your hosting platform
-6. Consider using a managed MySQL service instead of a container
-
-## Notes
-
-- The MySQL container automatically runs the `energy_trading_schema.sql` script on first startup
-- If you need to reset the database, use `docker-compose down -v` to remove volumes
-- The backend uses environment variables for all configuration, making it easy to deploy anywhere
+1. **Single Source of Truth:** All data is now on the blockchain
+2. **No MySQL Required:** Eliminates the need for a separate database
+3. **Decentralized:** Data is stored in CouchDB across multiple peers
+4. **Immutable History:** Blockchain provides full transaction history
+5. **Simplified Deployment:** One application instead of two
