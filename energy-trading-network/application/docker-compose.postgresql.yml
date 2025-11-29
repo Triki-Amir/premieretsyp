@@ -1,0 +1,34 @@
+# PostgreSQL Database for Authentication & Non-Essential Data
+# Trading data (energy, ID, currency) is stored in CouchDB via Hyperledger Fabric blockchain
+# Credentials and non-essential factory info is stored in PostgreSQL
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: energy_trading_postgres
+    environment:
+      POSTGRES_USER: energy_admin
+      POSTGRES_PASSWORD: energy_secure_password
+      POSTGRES_DB: energy_credentials
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U energy_admin -d energy_credentials"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - energy_network
+
+volumes:
+  postgres_data:
+
+networks:
+  energy_network:
+    driver: bridge

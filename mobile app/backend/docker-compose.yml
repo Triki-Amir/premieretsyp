@@ -1,29 +1,40 @@
-# NOTE: This docker-compose.yml is DEPRECATED
-# The mobile app backend has been merged with the blockchain application.
-# The unified application is located at: energy-trading-network/application/app.js
+# DEPRECATED - This directory is no longer used
 # 
-# MySQL is NO LONGER USED - all data is stored in CouchDB via Hyperledger Fabric
-# The CouchDB instances (couchdb0 and couchdb1) are started by the blockchain network.
+# The mobile app backend has been merged with the unified blockchain application.
+# 
+# CURRENT ARCHITECTURE:
+# ======================
+# 1. PostgreSQL - For credentials and non-essential data
+#    Location: energy-trading-network/application/docker-compose.postgresql.yml
+#    Start: cd energy-trading-network/application && npm run db:start
 #
-# To start the application:
-# 1. Start the blockchain network: cd energy-trading-network/network && ./startNetwork.sh
-# 2. Deploy chaincode: ./deployChaincode.sh
-# 3. Start the unified app: cd ../application && npm install && npm start
+# 2. CouchDB (via Hyperledger Fabric) - For trading data on blockchain
+#    Start: cd energy-trading-network/network && ./startNetwork.sh
 #
-# This file is kept for reference only and should not be used.
+# 3. Unified Application
+#    Location: energy-trading-network/application/app.js
+#    Start: cd energy-trading-network/application && npm install && npm start
+#
+# See: energy-trading-network/application/docker-compose.postgresql.yml
+
+version: '3.8'
 
 services:
-  # MySQL has been removed - using CouchDB via Hyperledger Fabric instead
-  # The backend has been merged with the blockchain application
-  
-  app-info:
+  deprecated-notice:
     image: alpine:latest
-    container_name: deprecated-notice
+    container_name: deprecated-backend-notice
     command: >
-      echo "NOTICE: This docker-compose is deprecated. 
+      echo "NOTICE: This docker-compose is deprecated.
       The mobile backend has been merged with the blockchain application.
-      Please use: energy-trading-network/application/app.js
-      Database: CouchDB via Hyperledger Fabric (couchdb0, couchdb1)"
+      
+      To start the application:
+      1. Start PostgreSQL: cd energy-trading-network/application && npm run db:start
+      2. Start blockchain: cd energy-trading-network/network && ./startNetwork.sh
+      3. Start app: cd energy-trading-network/application && npm start
+      
+      Databases:
+      - PostgreSQL: Credentials, profiles, login history
+      - CouchDB: Trading data (energy, currency, trades)"
     restart: "no"
 
 networks:
