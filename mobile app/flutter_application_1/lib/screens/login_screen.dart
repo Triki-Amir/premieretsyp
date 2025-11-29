@@ -89,16 +89,16 @@ class _LoginScreenState extends State<LoginScreen> {
       
       // Provide helpful error messages
       if (errorMessage.contains('Invalid email or password')) {
-        errorMessage = 'Invalid email or password. Please check your credentials.';
+        errorMessage = 'Invalid email or password. Please register a new account first, or use the Seed Database button in the app to create demo accounts.';
       } else if (errorMessage.contains('Cannot connect')) {
-        errorMessage = 'Cannot connect to server. Please ensure the backend is running.';
+        errorMessage = 'Cannot connect to server. Please ensure the blockchain backend is running on port 3000.';
       }
       
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(errorMessage),
           backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
+          duration: const Duration(seconds: 7),
         ),
       );
     } finally {
