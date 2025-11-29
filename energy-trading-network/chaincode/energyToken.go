@@ -63,11 +63,11 @@ type EnergyTrade struct {
 func (c *EnergyTokenContract) InitLedger(ctx contractapi.TransactionContextInterface) error {
 	// Create initial factories in the industrial zone
 	factories := []Factory{
-		{ID: "Factory01", Name: "Solar Manufacturing Plant", EnergyBalance: 1000.0, EnergyType: "solar", CurrencyBalance: 1000.0, DailyConsumption: 800.0, AvailableEnergy: 1200.0},
-		{ID: "Factory02", Name: "Wind Power Assembly", EnergyBalance: 800.0, EnergyType: "wind", CurrencyBalance: 800.0, DailyConsumption: 750.0, AvailableEnergy: 850.0},
-		{ID: "Factory03", Name: "Tech Production Facility", EnergyBalance: 500.0, EnergyType: "footstep", CurrencyBalance: 500.0, DailyConsumption: 600.0, AvailableEnergy: 450.0},
-		{ID: "Factory04", Name: "Heavy Industry Corp", EnergyBalance: 300.0, EnergyType: "solar", CurrencyBalance: 300.0, DailyConsumption: 900.0, AvailableEnergy: 250.0},
-		{ID: "Factory05", Name: "Electronics Assembly", EnergyBalance: 600.0, EnergyType: "wind", CurrencyBalance: 600.0, DailyConsumption: 550.0, AvailableEnergy: 700.0},
+		{ID: "Factory01", Name: "Solar Manufacturing Plant", EnergyBalance: 1000.0, EnergyType: "solar", CurrencyBalance: 1000.0, DailyConsumption: 800.0, AvailableEnergy: 1200.0, CurrentGeneration: 0, CurrentConsumption: 0},
+		{ID: "Factory02", Name: "Wind Power Assembly", EnergyBalance: 800.0, EnergyType: "wind", CurrencyBalance: 800.0, DailyConsumption: 750.0, AvailableEnergy: 850.0, CurrentGeneration: 0, CurrentConsumption: 0},
+		{ID: "Factory03", Name: "Tech Production Facility", EnergyBalance: 500.0, EnergyType: "footstep", CurrencyBalance: 500.0, DailyConsumption: 600.0, AvailableEnergy: 450.0, CurrentGeneration: 0, CurrentConsumption: 0},
+		{ID: "Factory04", Name: "Heavy Industry Corp", EnergyBalance: 300.0, EnergyType: "solar", CurrencyBalance: 300.0, DailyConsumption: 900.0, AvailableEnergy: 250.0, CurrentGeneration: 0, CurrentConsumption: 0},
+		{ID: "Factory05", Name: "Electronics Assembly", EnergyBalance: 600.0, EnergyType: "wind", CurrencyBalance: 600.0, DailyConsumption: 550.0, AvailableEnergy: 700.0, CurrentGeneration: 0, CurrentConsumption: 0},
 	}
 
 	// Store each factory in the blockchain ledger
@@ -103,13 +103,15 @@ func (c *EnergyTokenContract) RegisterFactory(ctx contractapi.TransactionContext
 
 	// Create new factory (CurrencyBalance set from parameter)
 	factory := Factory{
-		ID:               factoryID,
-		Name:             name,
-		EnergyBalance:    initialBalance,
-		EnergyType:       energyType,
-		CurrencyBalance:  currencyBalance,
-		DailyConsumption: dailyConsumption,
-		AvailableEnergy:  availableEnergy,
+		ID:                 factoryID,
+		Name:               name,
+		EnergyBalance:      initialBalance,
+		EnergyType:         energyType,
+		CurrencyBalance:    currencyBalance,
+		DailyConsumption:   dailyConsumption,
+		AvailableEnergy:    availableEnergy,
+		CurrentGeneration:  0,
+		CurrentConsumption: 0,
 	}
 
 	// Marshal factory to JSON
