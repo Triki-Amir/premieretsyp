@@ -288,8 +288,9 @@ class BackendApiService {
     required double pricePerKwh,
   }) async {
     try {
-      // Generate a unique trade ID
-      final tradeId = 'Trade_${DateTime.now().millisecondsSinceEpoch}_${energyAmount.toInt()}';
+      // Generate a unique trade ID with more entropy to avoid collisions
+      final random = DateTime.now().microsecondsSinceEpoch.toString().substring(7);
+      final tradeId = 'Trade_${DateTime.now().millisecondsSinceEpoch}_$random';
       
       // Use blockchain endpoint for creating trades
       final response = await http
