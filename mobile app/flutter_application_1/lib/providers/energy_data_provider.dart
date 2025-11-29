@@ -20,7 +20,7 @@ class EnergyDataProvider extends ChangeNotifier {
   
   // Current user's factory data from login
   Map<String, dynamic>? _currentUserFactory;
-  int? _myFactoryId;
+  String? _myFactoryId;
   
   CurrentEnergyData _currentData = CurrentEnergyData(
     generation: 0,
@@ -59,13 +59,15 @@ class EnergyDataProvider extends ChangeNotifier {
   bool get isLoadingTrades => _isLoadingTrades;
   bool get isSeeding => _isSeeding;
   String? get connectionError => _connectionError;
-  int? get myFactoryId => _myFactoryId;
+  String? get myFactoryId => _myFactoryId;
   Map<String, dynamic>? get currentUserFactory => _currentUserFactory;
   
   /// Set the current user's factory from login response
   void setCurrentUserFactory(Map<String, dynamic> factory) {
     _currentUserFactory = factory;
-    _myFactoryId = factory['id'] as int?;
+    // Factory ID can be either String or int from backend, convert to String
+    final id = factory['id'];
+    _myFactoryId = id?.toString();
     
     // Update current data based on logged-in user's factory
     final generation = (factory['current_generation'] as num?)?.toDouble() ?? 0;
@@ -127,12 +129,10 @@ class EnergyDataProvider extends ChangeNotifier {
       if (factoriesData.isNotEmpty) {
         _factories = factoriesData
             .where((json) {
-              // Ensure type-safe comparison - convert both to int if possible
-              final jsonId = json['id'];
+              // Ensure type-safe comparison - convert both to String for comparison
+              final jsonId = json['id']?.toString();
               if (jsonId == null || _myFactoryId == null) return true;
-              if (jsonId is int) return jsonId != _myFactoryId;
-              if (jsonId is String) return int.tryParse(jsonId) != _myFactoryId;
-              return true;
+              return jsonId != _myFactoryId;
             }) // Exclude current user's factory
             .map((json) => EnergyFactory.fromBackend(json))
             .toList();
@@ -237,14 +237,9 @@ class EnergyDataProvider extends ChangeNotifier {
       throw Exception('User not logged in');
     }
     
-    final sellerId = int.tryParse(sellerFactoryId);
-    if (sellerId == null) {
-      throw Exception('Invalid seller factory ID');
-    }
-    
     try {
       final result = await _backendApi.createTrade(
-        sellerFactoryId: sellerId,
+        sellerFactoryId: sellerFactoryId,
         buyerFactoryId: _myFactoryId!,
         energyAmount: amount,
         pricePerKwh: pricePerUnit,
@@ -270,15 +265,10 @@ class EnergyDataProvider extends ChangeNotifier {
       throw Exception('User not logged in');
     }
     
-    final buyerId = int.tryParse(buyerFactoryId);
-    if (buyerId == null) {
-      throw Exception('Invalid buyer factory ID');
-    }
-    
     try {
       final result = await _backendApi.createTrade(
         sellerFactoryId: _myFactoryId!,
-        buyerFactoryId: buyerId,
+        buyerFactoryId: buyerFactoryId,
         energyAmount: amount,
         pricePerKwh: pricePerUnit,
       );
@@ -304,8 +294,14 @@ class EnergyDataProvider extends ChangeNotifier {
     }
     
     try {
+      // Convert String factory ID to int for backend API
+      final factoryIdInt = int.tryParse(_myFactoryId!);
+      if (factoryIdInt == null) {
+        throw Exception('Invalid factory ID format');
+      }
+      
       await _backendApi.createOffer(
-        factoryId: _myFactoryId!,
+        factoryId: factoryIdInt,
         offerType: offerType,
         energyAmount: energyAmount,
         pricePerKwh: pricePerKwh,

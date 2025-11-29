@@ -4,12 +4,12 @@ import 'package:http/http.dart' as http;
 
 /// Service class for communicating with the backend API
 class BackendApiService {
-  // Base URL for the backend - configurable for different environments
+  // Base URL for the blockchain backend (Node.js app on port 3000)
   // For physical devices, use the actual server IP address
   // For Android emulator, use 10.0.2.2 to access host machine's localhost
   // For iOS simulator, localhost works
-  static String _baseUrl = 'http://localhost:5000/';
-  static String _baseUrl_blockchain = 'http://localhost:3000/api';
+  // For web or physical device, replace localhost with your server IP
+  static String _baseUrl = 'http://localhost:3000';
   
   /// Configure the base URL for different environments
   static void setBaseUrl(String url) {
@@ -111,12 +111,16 @@ class BackendApiService {
   Future<List<Map<String, dynamic>>> getAllFactories() async {
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl_blockchain/factories'))
+          .get(Uri.parse('$_baseUrl/api/factories'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return List<Map<String, dynamic>>.from(data['data'] ?? []);
+        // Handle both success formats
+        if (data['success'] == true) {
+          return List<Map<String, dynamic>>.from(data['data'] ?? []);
+        }
+        return List<Map<String, dynamic>>.from(data);
       } else {
         throw Exception('Failed to get factories: ${response.statusCode}');
       }
@@ -126,15 +130,18 @@ class BackendApiService {
   }
 
   /// Get a single factory by ID
-  Future<Map<String, dynamic>> getFactory(int factoryId) async {
+  Future<Map<String, dynamic>> getFactory(String factoryId) async {
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl_blockchain/factory/$factoryId'))
+          .get(Uri.parse('$_baseUrl/api/factory/$factoryId'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return data['data'];
+        if (data['success'] == true) {
+          return data['data'];
+        }
+        return data;
       } else {
         throw Exception('Failed to get factory: ${response.statusCode}');
       }
@@ -145,7 +152,7 @@ class BackendApiService {
 
   /// Update factory energy data
   Future<void> updateFactoryEnergy({
-    required int factoryId,
+    required String factoryId,
     required double energyBalance,
     required double currentGeneration,
     required double currentConsumption,
@@ -153,7 +160,7 @@ class BackendApiService {
     try {
       final response = await http
           .put(
-            Uri.parse('$_baseUrl_blockchain/factory/$factoryId/energy'),
+            Uri.parse('$_baseUrl/api/factory/$factoryId/energy'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'energy_balance': energyBalance,
@@ -177,7 +184,7 @@ class BackendApiService {
   Future<List<Map<String, dynamic>>> getAllOffers() async {
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl/offers'))
+          .get(Uri.parse('$_baseUrl/api/offers'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
@@ -201,7 +208,7 @@ class BackendApiService {
     try {
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/offers'),
+            Uri.parse('$_baseUrl/api/offers'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'factory_id': factoryId,
@@ -229,7 +236,7 @@ class BackendApiService {
     try {
       final response = await http
           .put(
-            Uri.parse('$_baseUrl/offers/$offerId'),
+            Uri.parse('$_baseUrl/api/offers/$offerId'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'status': status}),
           )
@@ -246,9 +253,9 @@ class BackendApiService {
   // ==================== TRADES ====================
 
   /// Get trades (optionally filter by factory ID)
-  Future<List<Map<String, dynamic>>> getTrades({int? factoryId}) async {
+  Future<List<Map<String, dynamic>>> getTrades({String? factoryId}) async {
     try {
-      String url = '$_baseUrl/trades';
+      String url = '$_baseUrl/api/trades';
       if (factoryId != null) {
         url += '?factory_id=$factoryId';
       }
@@ -270,15 +277,15 @@ class BackendApiService {
 
   /// Create a new trade
   Future<Map<String, dynamic>> createTrade({
-    required int sellerFactoryId,
-    required int buyerFactoryId,
+    required String sellerFactoryId,
+    required String buyerFactoryId,
     required double energyAmount,
     required double pricePerKwh,
   }) async {
     try {
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/trades'),
+            Uri.parse('$_baseUrl/api/trades'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'seller_factory_id': sellerFactoryId,
@@ -302,11 +309,11 @@ class BackendApiService {
   }
 
   /// Execute a trade
-  Future<Map<String, dynamic>> executeTrade(int tradeId) async {
+  Future<Map<String, dynamic>> executeTrade(String tradeId) async {
     try {
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/trades/$tradeId/execute'),
+            Uri.parse('$_baseUrl/api/trades/$tradeId/execute'),
             headers: {'Content-Type': 'application/json'},
           )
           .timeout(timeout);
@@ -330,7 +337,7 @@ class BackendApiService {
     try {
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/seed'),
+            Uri.parse('$_baseUrl/api/seed'),
             headers: {'Content-Type': 'application/json'},
           )
           .timeout(const Duration(seconds: 30)); // Longer timeout for seeding

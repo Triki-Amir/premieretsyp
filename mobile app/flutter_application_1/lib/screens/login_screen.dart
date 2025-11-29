@@ -48,13 +48,18 @@ class _LoginScreenState extends State<LoginScreen> {
       print('Attempting to login with email: ${_emailController.text}');
 
       final response = await _backendApi.login(
-        _emailController.text,
+        _emailController.text.trim(),
         _passwordController.text,
       );
 
       print('Login response: $response');
 
       if (!mounted) return;
+
+      // Check if response contains factory data
+      if (response['factory'] == null) {
+        throw Exception('Invalid response from server: no factory data');
+      }
 
       // Store the factory data in the provider
       final factory = response['factory'] as Map<String, dynamic>;
@@ -79,10 +84,21 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (e) {
       print('An error occurred during login: $e');
       if (!mounted) return;
+      
+      String errorMessage = e.toString().replaceAll('Exception: ', '');
+      
+      // Provide helpful error messages
+      if (errorMessage.contains('Invalid email or password')) {
+        errorMessage = 'Invalid email or password. Please check your credentials.';
+      } else if (errorMessage.contains('Cannot connect')) {
+        errorMessage = 'Cannot connect to server. Please ensure the backend is running.';
+      }
+      
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Login failed: ${e.toString().replaceAll('Exception: ', '')}'),
+          content: Text(errorMessage),
           backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
         ),
       );
     } finally {
@@ -102,7 +118,7 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       print('Attempting to sign up...');
 
-      await _backendApi.signup(
+      final result = await _backendApi.signup(
         factoryName: _factoryNameController.text,
         email: _emailController.text,
         password: _passwordController.text,
@@ -115,14 +131,21 @@ class _LoginScreenState extends State<LoginScreen> {
         energySource: _energySourceController.text.isNotEmpty ? _energySourceController.text : null,
       );
 
+      print('Signup successful: $result');
+
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Factory registered successfully! Please login.'),
+        SnackBar(
+          content: Text('Factory registered successfully! Please wait a moment before logging in.'),
           backgroundColor: Colors.green,
+          duration: const Duration(seconds: 4),
         ),
       );
+      
+      // Wait a bit for blockchain transaction to complete
+      await Future.delayed(const Duration(seconds: 2));
+      
       setState(() {
         _isLogin = true; // Switch to login screen on success
       });
