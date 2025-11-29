@@ -183,8 +183,9 @@ class BackendApiService {
   /// Get all active offers
   Future<List<Map<String, dynamic>>> getAllOffers() async {
     try {
+      // Use mobile app format endpoint (without /api prefix)
       final response = await http
-          .get(Uri.parse('$_baseUrl/api/offers'))
+          .get(Uri.parse('$_baseUrl/offers'))
           .timeout(timeout);
 
       if (response.statusCode == 200) {
@@ -200,15 +201,16 @@ class BackendApiService {
 
   /// Create a new offer
   Future<Map<String, dynamic>> createOffer({
-    required int factoryId,
+    required String factoryId,
     required String offerType, // 'buy' or 'sell'
     required double energyAmount,
     required double pricePerKwh,
   }) async {
     try {
+      // Use mobile app format endpoint (without /api prefix)
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/api/offers'),
+            Uri.parse('$_baseUrl/offers'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'factory_id': factoryId,
@@ -234,9 +236,10 @@ class BackendApiService {
   /// Update offer status
   Future<void> updateOfferStatus(int offerId, String status) async {
     try {
+      // Use mobile app format endpoint (without /api prefix)
       final response = await http
           .put(
-            Uri.parse('$_baseUrl/api/offers/$offerId'),
+            Uri.parse('$_baseUrl/offers/$offerId'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'status': status}),
           )
@@ -255,7 +258,8 @@ class BackendApiService {
   /// Get trades (optionally filter by factory ID)
   Future<List<Map<String, dynamic>>> getTrades({String? factoryId}) async {
     try {
-      String url = '$_baseUrl/api/trades';
+      // Use mobile app format endpoint (without /api prefix)
+      String url = '$_baseUrl/trades';
       if (factoryId != null) {
         url += '?factory_id=$factoryId';
       }
@@ -275,7 +279,8 @@ class BackendApiService {
     }
   }
 
-  /// Create a new trade
+  /// Create a new trade using blockchain endpoint
+  /// This creates a trade on the blockchain via /api/trade/create
   Future<Map<String, dynamic>> createTrade({
     required String sellerFactoryId,
     required String buyerFactoryId,
@@ -283,22 +288,28 @@ class BackendApiService {
     required double pricePerKwh,
   }) async {
     try {
+      // Generate a unique trade ID with more entropy to avoid collisions
+      final random = DateTime.now().microsecondsSinceEpoch.toString().substring(7);
+      final tradeId = 'Trade_${DateTime.now().millisecondsSinceEpoch}_$random';
+      
+      // Use blockchain endpoint for creating trades
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/api/trades'),
+            Uri.parse('$_baseUrl/api/trade/create'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'seller_factory_id': sellerFactoryId,
-              'buyer_factory_id': buyerFactoryId,
-              'energy_amount': energyAmount,
-              'price_per_kwh': pricePerKwh,
+              'tradeId': tradeId,
+              'sellerId': sellerFactoryId,
+              'buyerId': buyerFactoryId,
+              'amount': energyAmount,
+              'pricePerUnit': pricePerKwh,
             }),
           )
           .timeout(timeout);
 
       final data = jsonDecode(response.body);
       
-      if (response.statusCode == 201) {
+      if (response.statusCode == 200 || response.statusCode == 201) {
         return data;
       } else {
         throw Exception(data['error'] ?? 'Failed to create trade');
@@ -308,13 +319,16 @@ class BackendApiService {
     }
   }
 
-  /// Execute a trade
+  /// Execute a trade using blockchain endpoint
+  /// This executes a pending trade on the blockchain via /api/trade/execute
   Future<Map<String, dynamic>> executeTrade(String tradeId) async {
     try {
+      // Use blockchain endpoint for executing trades
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/api/trades/$tradeId/execute'),
+            Uri.parse('$_baseUrl/api/trade/execute'),
             headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'tradeId': tradeId}),
           )
           .timeout(timeout);
 
@@ -335,9 +349,10 @@ class BackendApiService {
   /// Seed the database with sample data
   Future<Map<String, dynamic>> seedDatabase() async {
     try {
+      // Use mobile app format endpoint (without /api prefix)
       final response = await http
           .post(
-            Uri.parse('$_baseUrl/api/seed'),
+            Uri.parse('$_baseUrl/seed'),
             headers: {'Content-Type': 'application/json'},
           )
           .timeout(const Duration(seconds: 30)); // Longer timeout for seeding

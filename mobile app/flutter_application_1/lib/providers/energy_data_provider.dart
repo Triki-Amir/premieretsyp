@@ -283,6 +283,21 @@ class EnergyDataProvider extends ChangeNotifier {
     }
   }
   
+  /// Execute a pending trade on the blockchain
+  Future<Map<String, dynamic>> executeTrade(String tradeId) async {
+    try {
+      final result = await _backendApi.executeTrade(tradeId);
+      
+      // Reload data to update balances
+      await loadFactoriesFromBackend();
+      await loadTrades();
+      
+      return result;
+    } catch (e) {
+      throw Exception('Failed to execute trade: $e');
+    }
+  }
+  
   /// Create a new offer
   Future<void> createOffer({
     required String offerType,
@@ -294,14 +309,8 @@ class EnergyDataProvider extends ChangeNotifier {
     }
     
     try {
-      // Convert String factory ID to int for backend API
-      final factoryIdInt = int.tryParse(_myFactoryId!);
-      if (factoryIdInt == null) {
-        throw Exception('Invalid factory ID format');
-      }
-      
       await _backendApi.createOffer(
-        factoryId: factoryIdInt,
+        factoryId: _myFactoryId!,
         offerType: offerType,
         energyAmount: energyAmount,
         pricePerKwh: pricePerKwh,

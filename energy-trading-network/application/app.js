@@ -1135,6 +1135,7 @@ app.post('/trades/:id/execute', async (req, res) => {
 /**
  * Seed the database with sample data (for testing)
  * POST /seed
+ * Creates sample factories with authentication credentials for testing
  */
 app.post('/seed', async (req, res) => {
     console.log('Seeding database with sample data (CouchDB via blockchain)...');
@@ -1146,11 +1147,88 @@ app.post('/seed', async (req, res) => {
         // Initialize ledger with sample factories via chaincode
         await contract.submitTransaction('InitLedger');
 
+        // Create sample factories with authentication for login testing
+        const sampleFactories = [
+            {
+                factory_name: 'Demo Solar Factory',
+                email: 'demo@solar.com',
+                password: 'Demo1234',
+                fiscal_matricule: 'FM-DEMO-SOLAR',
+                localisation: 'Tunis Industrial Zone',
+                energy_capacity: 5000,
+                contact_info: '+216-555-0001',
+                energy_source: 'solar'
+            },
+            {
+                factory_name: 'Demo Wind Factory',
+                email: 'demo@wind.com',
+                password: 'Demo1234',
+                fiscal_matricule: 'FM-DEMO-WIND',
+                localisation: 'Sfax Industrial Zone',
+                energy_capacity: 4000,
+                contact_info: '+216-555-0002',
+                energy_source: 'wind'
+            }
+        ];
+
+        const createdFactories = [];
+
+        for (const factory of sampleFactories) {
+            try {
+                // Check if email already exists
+                try {
+                    await contract.evaluateTransaction('GetFactoryByEmail', factory.email);
+                    console.log(`Factory with email ${factory.email} already exists, skipping.`);
+                    continue; // Skip if already exists
+                } catch (e) {
+                    // Factory doesn't exist, create it
+                }
+
+                // Hash password
+                const salt = await bcrypt.genSalt(10);
+                const hashedPassword = await bcrypt.hash(factory.password, salt);
+
+                // Generate unique factory ID
+                const factoryId = 'Factory_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+
+                // Register factory with authentication
+                await contract.submitTransaction(
+                    'RegisterFactoryWithAuth',
+                    factoryId,
+                    factory.factory_name,
+                    factory.email,
+                    hashedPassword,
+                    factory.localisation || '',
+                    factory.fiscal_matricule,
+                    (factory.energy_capacity || 0).toString(),
+                    factory.contact_info || '',
+                    factory.energy_source || '',
+                    '1000', // initialBalance
+                    '500'   // currencyBalance
+                );
+
+                createdFactories.push({
+                    factoryId,
+                    email: factory.email,
+                    password: factory.password // Return plain password for testing
+                });
+
+                console.log(`Created sample factory: ${factory.factory_name} (${factory.email})`);
+            } catch (err) {
+                console.log(`Note for factory ${factory.factory_name}:`, err.message);
+            }
+        }
+
         await gateway.disconnect();
 
         res.status(200).json({ 
             success: true,
-            message: 'Database seeded successfully via blockchain (CouchDB)!'
+            message: 'Database seeded successfully via blockchain (CouchDB)!',
+            note: 'Sample factories created with authentication for testing.',
+            testCredentials: createdFactories.length > 0 ? createdFactories : [
+                { email: 'demo@solar.com', password: 'Demo1234' },
+                { email: 'demo@wind.com', password: 'Demo1234' }
+            ]
         });
 
     } catch (error) {

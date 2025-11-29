@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import '../providers/energy_data_provider.dart';
 import '../models/factory.dart';
+import '../models/trade.dart';
+import '../widgets/trade_card.dart';
 
 class DashboardScreenNew extends StatefulWidget {
   final Function(String) onNavigate;
@@ -26,6 +28,8 @@ class _DashboardScreenNewState extends State<DashboardScreenNew> {
       if (!provider.isConnectedToBlockchain) {
         provider.loadFactoriesFromBlockchain();
       }
+      // Also load trades for visualization
+      provider.loadTrades();
     });
   }
 
@@ -280,6 +284,110 @@ class _DashboardScreenNewState extends State<DashboardScreenNew> {
                       ),
                     ),
                   ),
+
+                  // Recent Trades Section
+                  if (energyData.trades.isNotEmpty)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.receipt_long, color: Colors.blue, size: 20),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Recent Trades',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            TextButton(
+                              onPressed: () => widget.onNavigate('offers'),
+                              child: const Text('View All'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  
+                  // Show up to 3 recent trades
+                  if (energyData.trades.isNotEmpty)
+                    SliverToBoxAdapter(
+                      child: SizedBox(
+                        height: 120,
+                        child: ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          itemCount: energyData.trades.length > 3 ? 3 : energyData.trades.length,
+                          itemBuilder: (context, index) {
+                            final trade = energyData.trades[index];
+                            final isBuy = trade.type == TradeType.buy;
+                            return Container(
+                              width: 200,
+                              margin: const EdgeInsets.only(right: 12),
+                              child: Card(
+                                color: Colors.grey.shade900,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            isBuy ? Icons.arrow_downward : Icons.arrow_upward,
+                                            color: isBuy ? Colors.blue : Colors.green,
+                                            size: 16,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Expanded(
+                                            child: Text(
+                                              trade.factoryName,
+                                              style: const TextStyle(color: Colors.white, fontSize: 14),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        '${trade.kWh} kWh',
+                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                      ),
+                                      Text(
+                                        '\$${trade.totalPrice.toStringAsFixed(2)}',
+                                        style: const TextStyle(color: Colors.grey, fontSize: 12),
+                                      ),
+                                      const Spacer(),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: _getTradeStatusColor(trade.status).withOpacity(0.2),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          trade.status.name.toUpperCase(),
+                                          style: TextStyle(
+                                            color: _getTradeStatusColor(trade.status),
+                                            fontSize: 10,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
 
                   // Section Header
                   SliverToBoxAdapter(
@@ -645,5 +753,18 @@ class _DashboardScreenNewState extends State<DashboardScreenNew> {
         ],
       ),
     );
+  }
+
+  Color _getTradeStatusColor(TradeStatus status) {
+    switch (status) {
+      case TradeStatus.pending:
+        return Colors.yellow;
+      case TradeStatus.active:
+        return Colors.blue;
+      case TradeStatus.completed:
+        return Colors.green;
+      case TradeStatus.cancelled:
+        return Colors.red;
+    }
   }
 }
