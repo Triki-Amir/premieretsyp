@@ -3,16 +3,138 @@
  * Unified application for factories to interact with the blockchain
  * Provides REST API endpoints for energy token operations and mobile app authentication
  * 
- * This application uses CouchDB (via Hyperledger Fabric) as the only database.
- * No MySQL is required - all data is stored on the blockchain ledger (couchdb0 and couchdb1).
+ * DATABASE ARCHITECTURE:
+ * - PostgreSQL: Stores authentication credentials and non-essential factory info
+ *   (login data, profiles, login history, password resets)
+ * - CouchDB (via Hyperledger Fabric): Stores trading data on the blockchain
+ *   (energy balance, currency, trades, offers - immutable ledger)
  */
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { Gateway, Wallets } = require('fabric-network');
+const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
+
+// Simple in-memory rate limiter for authentication endpoints
+const rateLimitStore = new Map();
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_LOGIN_ATTEMPTS = 5; // Max attempts per window
+const MAX_SIGNUP_ATTEMPTS = 3; // Max signup attempts per window
+const RATE_LIMIT_CLEANUP_THRESHOLD = 10000; // Cleanup when exceeding this many entries
+
+/**
+ * Rate limiter middleware for authentication endpoints
+ * @param {number} maxAttempts - Maximum attempts allowed in the window
+ * @returns {Function} Express middleware function
+ */
+function rateLimiter(maxAttempts) {
+    return (req, res, next) => {
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+        const key = `${req.path}:${clientIp}`;
+        const now = Date.now();
+        
+        // Get or create rate limit entry
+        let entry = rateLimitStore.get(key);
+        if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+            entry = { count: 0, windowStart: now };
+        }
+        
+        entry.count++;
+        rateLimitStore.set(key, entry);
+        
+        // Clean up old entries periodically when threshold exceeded
+        if (rateLimitStore.size > RATE_LIMIT_CLEANUP_THRESHOLD) {
+            for (const [k, v] of rateLimitStore) {
+                if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) {
+                    rateLimitStore.delete(k);
+                }
+            }
+        }
+        
+        if (entry.count > maxAttempts) {
+            const retryAfter = Math.ceil((entry.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000);
+            res.setHeader('Retry-After', retryAfter);
+            return res.status(429).json({ 
+                error: 'Too many attempts. Please try again later.',
+                retryAfter: retryAfter
+            });
+        }
+        
+        next();
+    };
+}
+
+// Rate limiter instances for authentication
+const loginRateLimiter = rateLimiter(MAX_LOGIN_ATTEMPTS);
+const signupRateLimiter = rateLimiter(MAX_SIGNUP_ATTEMPTS);
+
+// PostgreSQL connection pool for credentials and non-essential data
+const pgPool = new Pool({
+    host: process.env.PG_HOST || 'localhost',
+    port: parseInt(process.env.PG_PORT) || 5432,
+    user: process.env.PG_USER || 'energy_admin',
+    password: process.env.PG_PASSWORD || 'energy_secure_password',
+    database: process.env.PG_DATABASE || 'energy_credentials',
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+});
+
+// PostgreSQL connection status - initialized as a promise for proper synchronization
+let pgConnected = false;
+let pgConnectionPromise = pgPool.connect()
+    .then(client => {
+        console.log('✅ PostgreSQL connected successfully');
+        pgConnected = true;
+        client.release();
+        return true;
+    })
+    .catch(err => {
+        console.log('⚠️  PostgreSQL not available, falling back to blockchain-only mode');
+        console.log('   To enable PostgreSQL: npm run db:start');
+        pgConnected = false;
+        return false;
+    });
+
+// Cache for PostgreSQL connection status
+let pgStatusCache = { status: null, timestamp: 0 };
+const PG_STATUS_CACHE_TTL = 30000; // 30 seconds cache
+
+/**
+ * Check if PostgreSQL is available (with caching and proper synchronization)
+ * @returns {Promise<boolean>}
+ */
+async function isPgConnected() {
+    // Wait for initial connection check to complete
+    await pgConnectionPromise;
+    
+    const now = Date.now();
+    
+    // Return cached status if still valid
+    if (pgStatusCache.status !== null && now - pgStatusCache.timestamp < PG_STATUS_CACHE_TTL) {
+        return pgStatusCache.status;
+    }
+    
+    // If already connected, verify connection is still alive
+    if (pgConnected) {
+        try {
+            const client = await pgPool.connect();
+            client.release();
+            pgStatusCache = { status: true, timestamp: now };
+            return true;
+        } catch (err) {
+            pgConnected = false;
+            pgStatusCache = { status: false, timestamp: now };
+            return false;
+        }
+    }
+    
+    pgStatusCache = { status: false, timestamp: now };
+    return false;
+}
 
 // Initialize Express application
 const app = express();
@@ -130,11 +252,22 @@ async function getContract(factoryId = 'admin') {
 // ==================== HEALTH CHECK ====================
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+    const pgStatus = await isPgConnected();
     res.json({ 
         status: 'OK', 
-        message: 'Energy Trading API is running (CouchDB only - no MySQL)',
-        database: 'CouchDB via Hyperledger Fabric (couchdb0, couchdb1)',
+        message: 'Energy Trading API is running',
+        databases: {
+            postgresql: {
+                status: pgStatus ? 'connected' : 'not available',
+                purpose: 'Credentials & profiles storage'
+            },
+            blockchain: {
+                status: 'configured',
+                type: 'CouchDB via Hyperledger Fabric',
+                purpose: 'Trading data (energy, currency, trades)'
+            }
+        },
         timestamp: new Date().toISOString()
     });
 });
@@ -590,20 +723,31 @@ app.get('/api/factory/:factoryId/history', async (req, res) => {
 // ==================== MOBILE APP AUTHENTICATION ENDPOINTS ====================
 
 // Simple test endpoint (for mobile app compatibility)
-app.get('/test', (req, res) => {
+app.get('/test', async (req, res) => {
     console.log('Test endpoint hit!');
-    res.json({ message: 'Backend is working! (CouchDB only - no MySQL)' });
+    const pgStatus = await isPgConnected();
+    res.json({ 
+        message: 'Backend is working!',
+        databases: {
+            postgresql: pgStatus ? 'connected' : 'not available (credentials stored in blockchain)',
+            blockchain: 'CouchDB via Hyperledger Fabric'
+        }
+    });
 });
 
 /**
  * Login Endpoint - Authenticate factory user
+ * Uses PostgreSQL for credentials if available, falls back to blockchain
+ * Rate limited to prevent brute-force attacks
  * POST /login
  * Body: { email, password }
  */
-app.post('/login', async (req, res) => {
+app.post('/login', loginRateLimiter, async (req, res) => {
     console.log('Received login request with email:', req.body.email);
     try {
         const { email, password } = req.body;
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+        const userAgent = req.headers['user-agent'] || 'unknown';
 
         // Basic validation
         if (!email || !password) {
@@ -611,11 +755,114 @@ app.post('/login', async (req, res) => {
             return res.status(400).send({ error: 'Email and password are required.' });
         }
 
-        // Connect to network
+        let factory = null;
+        let passwordHash = null;
+        let factoryId = null;
+
+        // Try PostgreSQL first for credentials (with proper synchronization)
+        const pgAvailable = await isPgConnected();
+        if (pgAvailable) {
+            try {
+                // SQL query for fetching credentials with profile data
+                const credentialQuery = `
+                    SELECT 
+                        fc.factory_id, 
+                        fc.password_hash, 
+                        fc.email, 
+                        fp.factory_name, 
+                        fp.localisation, 
+                        fc.fiscal_matricule, 
+                        fp.energy_capacity, 
+                        fp.contact_info 
+                    FROM factories_credentials fc 
+                    LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id 
+                    WHERE fc.email = $1 AND fc.is_active = true
+                `;
+                const credResult = await pgPool.query(credentialQuery, [email]);
+                
+                if (credResult.rows.length > 0) {
+                    const cred = credResult.rows[0];
+                    factoryId = cred.factory_id;
+                    passwordHash = cred.password_hash;
+                    
+                    // Verify password
+                    const isPasswordValid = await bcrypt.compare(password, passwordHash);
+                    if (!isPasswordValid) {
+                        // Log failed login attempt
+                        await pgPool.query(
+                            'INSERT INTO login_history (factory_id, ip_address, user_agent, success) VALUES ($1, $2, $3, false)',
+                            [factoryId, clientIp, userAgent]
+                        );
+                        console.log('Login failed: Invalid password.');
+                        return res.status(401).send({ error: 'Invalid email or password.' });
+                    }
+
+                    // Log successful login
+                    await pgPool.query(
+                        'INSERT INTO login_history (factory_id, ip_address, user_agent, success) VALUES ($1, $2, $3, true)',
+                        [factoryId, clientIp, userAgent]
+                    );
+                    await pgPool.query(
+                        'UPDATE factories_credentials SET last_login = NOW() WHERE factory_id = $1',
+                        [factoryId]
+                    );
+
+                    // Get trading data from blockchain
+                    try {
+                        const { contract, gateway } = await getContract();
+                        const result = await contract.evaluateTransaction('GetFactory', factoryId);
+                        const blockchainData = parseResult(result, {});
+                        await gateway.disconnect();
+
+                        console.log('Login successful for:', email, '(PostgreSQL + Blockchain)');
+                        return res.status(200).send({ 
+                            message: 'Login successful!',
+                            factory: {
+                                id: factoryId,
+                                factory_name: cred.factory_name,
+                                email: cred.email,
+                                localisation: cred.localisation,
+                                fiscal_matricule: cred.fiscal_matricule,
+                                energy_capacity: cred.energy_capacity,
+                                contact_info: cred.contact_info,
+                                energy_source: blockchainData.energyType || '',
+                                energy_balance: blockchainData.energyBalance || 0,
+                                current_generation: blockchainData.currentGeneration || 0,
+                                current_consumption: blockchainData.currentConsumption || 0,
+                                currency_balance: blockchainData.currencyBalance || 0
+                            }
+                        });
+                    } catch (blockchainErr) {
+                        // Return with profile data only if blockchain is not available
+                        console.log('Login successful for:', email, '(PostgreSQL only - blockchain not available)');
+                        return res.status(200).send({ 
+                            message: 'Login successful!',
+                            factory: {
+                                id: factoryId,
+                                factory_name: cred.factory_name,
+                                email: cred.email,
+                                localisation: cred.localisation,
+                                fiscal_matricule: cred.fiscal_matricule,
+                                energy_capacity: cred.energy_capacity,
+                                contact_info: cred.contact_info,
+                                energy_source: '',
+                                energy_balance: 0,
+                                current_generation: 0,
+                                current_consumption: 0,
+                                currency_balance: 0
+                            },
+                            warning: 'Blockchain not available - trading data not loaded'
+                        });
+                    }
+                }
+            } catch (pgErr) {
+                console.log('PostgreSQL query failed, falling back to blockchain:', pgErr.message);
+            }
+        }
+
+        // Fallback to blockchain for credentials
         const { contract, gateway } = await getContract();
 
-        // Get factory by email from CouchDB via chaincode
-        let factory;
         try {
             const result = await contract.evaluateTransaction('GetFactoryByEmail', email);
             factory = parseResult(result, null);
@@ -640,7 +887,7 @@ app.post('/login', async (req, res) => {
             return res.status(401).send({ error: 'Invalid email or password.' });
         }
 
-        console.log('Login successful for:', email);
+        console.log('Login successful for:', email, '(Blockchain only)');
         res.status(200).send({ 
             message: 'Login successful!',
             factory: {
@@ -666,10 +913,13 @@ app.post('/login', async (req, res) => {
 
 /**
  * Sign-Up Endpoint - Register new factory with authentication
+ * Stores credentials in PostgreSQL, trading data in blockchain
+ * Always stores password hash in blockchain as fallback for consistent authentication
+ * Rate limited to prevent abuse
  * POST /signup
  * Body: { factory_name, localisation, fiscal_matricule, energy_capacity, contact_info, energy_source, email, password }
  */
-app.post('/signup', async (req, res) => {
+app.post('/signup', signupRateLimiter, async (req, res) => {
     console.log('Received signup request with body:', req.body);
     try {
         const {
@@ -705,17 +955,79 @@ app.post('/signup', async (req, res) => {
         // Generate unique factory ID
         const factoryId = generateFactoryId();
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        // Check PostgreSQL availability with proper synchronization
+        const pgAvailable = await isPgConnected();
+        let pgRegistered = false;
 
-        // Register factory with authentication via chaincode (stored in CouchDB)
+        // Store credentials in PostgreSQL if available
+        if (pgAvailable) {
+            const pgClient = await pgPool.connect();
+            try {
+                await pgClient.query('BEGIN');
+
+                // Check if email or fiscal matricule already exists
+                const existCheckQuery = `
+                    SELECT email, fiscal_matricule 
+                    FROM factories_credentials 
+                    WHERE email = $1 OR fiscal_matricule = $2
+                `;
+                const existCheck = await pgClient.query(existCheckQuery, [email, fiscal_matricule]);
+                
+                if (existCheck.rows.length > 0) {
+                    await pgClient.query('ROLLBACK');
+                    return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
+                }
+
+                // Insert credentials
+                const insertCredQuery = `
+                    INSERT INTO factories_credentials 
+                    (factory_id, email, password_hash, fiscal_matricule) 
+                    VALUES ($1, $2, $3, $4)
+                `;
+                await pgClient.query(insertCredQuery, [factoryId, email, hashedPassword, fiscal_matricule]);
+
+                // Insert profile
+                const insertProfileQuery = `
+                    INSERT INTO factory_profiles 
+                    (factory_id, factory_name, localisation, contact_info, energy_capacity) 
+                    VALUES ($1, $2, $3, $4, $5)
+                `;
+                await pgClient.query(insertProfileQuery, [
+                    factoryId, 
+                    factory_name, 
+                    localisation || '', 
+                    contact_info || '', 
+                    energy_capacity || 0
+                ]);
+
+                await pgClient.query('COMMIT');
+                pgRegistered = true;
+                console.log('Credentials stored in PostgreSQL for:', email);
+            } catch (pgErr) {
+                await pgClient.query('ROLLBACK');
+                if (pgErr.code === '23505') { // Unique violation
+                    return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
+                }
+                throw pgErr;
+            } finally {
+                pgClient.release();
+            }
+        }
+
+        // Register trading data on blockchain
+        // Always store password hash in blockchain for fallback authentication
+        let blockchainRegistered = false;
         try {
+            const { contract, gateway } = await getContract();
+
+            // Register factory with authentication via chaincode (stored in CouchDB)
+            // Always store password hash for consistent authentication even if PostgreSQL becomes unavailable
             await contract.submitTransaction(
                 'RegisterFactoryWithAuth',
                 factoryId,
                 factory_name,
                 email,
-                hashedPassword,
+                hashedPassword, // Always store password hash in blockchain for fallback
                 localisation || '',
                 fiscal_matricule,
                 (energy_capacity || 0).toString(),
@@ -724,20 +1036,36 @@ app.post('/signup', async (req, res) => {
                 '0', // initialBalance
                 '0'  // currencyBalance
             );
-        } catch (err) {
+
             await gateway.disconnect();
-            if (err.message.includes('already registered') || err.message.includes('already exists')) {
+            blockchainRegistered = true;
+            console.log('Factory registered on blockchain:', factoryId);
+        } catch (blockchainErr) {
+            // If PostgreSQL was used but blockchain failed, we have partial registration
+            if (pgRegistered) {
+                console.log('Warning: Credentials stored in PostgreSQL but blockchain registration failed');
+                console.log('Factory registered successfully in PostgreSQL (blockchain pending):', email);
+                return res.status(201).send({ 
+                    message: 'Factory registered successfully! (Blockchain sync pending)',
+                    factoryId: factoryId,
+                    warning: 'Trading features will be available once blockchain is connected'
+                });
+            }
+            
+            if (blockchainErr.message.includes('already registered') || blockchainErr.message.includes('already exists')) {
                 return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
             }
-            throw err;
+            throw blockchainErr;
         }
-
-        await gateway.disconnect();
 
         console.log('Factory registered successfully:', email);
         res.status(201).send({ 
             message: 'Factory registered successfully!',
-            factoryId: factoryId
+            factoryId: factoryId,
+            storage: {
+                credentials: pgRegistered ? 'PostgreSQL + Blockchain' : 'Blockchain',
+                tradingData: 'Blockchain (CouchDB)'
+            }
         });
 
     } catch (error) {
@@ -1252,8 +1580,18 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`Also accessible at http://127.0.0.1:${PORT}`);
     console.log('');
-    console.log('Database: CouchDB via Hyperledger Fabric');
-    console.log('         (couchdb0 and couchdb1 only - no MySQL)');
+    console.log('Databases:');
+    console.log(`  PostgreSQL: ${pgConnected ? '✅ Connected' : '⚠️  Not available (fallback to blockchain)'}`);
+    console.log('    - Credentials (email, password, fiscal matricule)');
+    console.log('    - Factory profiles (name, location, contact info)');
+    console.log('    - Login history & password resets');
+    console.log('');
+    console.log('  Blockchain (CouchDB via Hyperledger Fabric):');
+    console.log('    - Trading data (energy balance, currency)');
+    console.log('    - Offers and trades (immutable ledger)');
+    console.log('    - Factory trading records');
+    console.log('');
+    console.log('To start PostgreSQL: npm run db:start');
     console.log('');
     console.log('Available endpoints:');
     console.log('');
