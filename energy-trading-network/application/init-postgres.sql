@@ -79,6 +79,7 @@ CREATE TRIGGER update_factory_profiles_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- Grant permissions
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO energy_admin;
+-- Grant specific permissions (principle of least privilege)
+-- Only grant the necessary operations for the application
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO energy_admin;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO energy_admin;

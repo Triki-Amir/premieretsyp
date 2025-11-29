@@ -23,6 +23,7 @@ const rateLimitStore = new Map();
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_LOGIN_ATTEMPTS = 5; // Max attempts per window
 const MAX_SIGNUP_ATTEMPTS = 3; // Max signup attempts per window
+const RATE_LIMIT_CLEANUP_THRESHOLD = 10000; // Cleanup when exceeding this many entries
 
 /**
  * Rate limiter middleware for authentication endpoints
@@ -44,8 +45,8 @@ function rateLimiter(maxAttempts) {
         entry.count++;
         rateLimitStore.set(key, entry);
         
-        // Clean up old entries periodically
-        if (rateLimitStore.size > 10000) {
+        // Clean up old entries periodically when threshold exceeded
+        if (rateLimitStore.size > RATE_LIMIT_CLEANUP_THRESHOLD) {
             for (const [k, v] of rateLimitStore) {
                 if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) {
                     rateLimitStore.delete(k);
@@ -98,25 +99,40 @@ let pgConnectionPromise = pgPool.connect()
         return false;
     });
 
+// Cache for PostgreSQL connection status
+let pgStatusCache = { status: null, timestamp: 0 };
+const PG_STATUS_CACHE_TTL = 30000; // 30 seconds cache
+
 /**
- * Check if PostgreSQL is available (with proper synchronization)
+ * Check if PostgreSQL is available (with caching and proper synchronization)
  * @returns {Promise<boolean>}
  */
 async function isPgConnected() {
     // Wait for initial connection check to complete
     await pgConnectionPromise;
     
+    const now = Date.now();
+    
+    // Return cached status if still valid
+    if (pgStatusCache.status !== null && now - pgStatusCache.timestamp < PG_STATUS_CACHE_TTL) {
+        return pgStatusCache.status;
+    }
+    
     // If already connected, verify connection is still alive
     if (pgConnected) {
         try {
             const client = await pgPool.connect();
             client.release();
+            pgStatusCache = { status: true, timestamp: now };
             return true;
         } catch (err) {
             pgConnected = false;
+            pgStatusCache = { status: false, timestamp: now };
             return false;
         }
     }
+    
+    pgStatusCache = { status: false, timestamp: now };
     return false;
 }
 
