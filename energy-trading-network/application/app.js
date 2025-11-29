@@ -12,6 +12,7 @@
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
@@ -24,8 +25,14 @@ try {
     Gateway = fabricNetwork.Gateway;
     Wallets = fabricNetwork.Wallets;
 } catch (e) {
+    // fabric-network module not installed - running in PostgreSQL-only mode
     console.log('⚠️  fabric-network not available, running in PostgreSQL-only mode');
 }
+
+// Default initial values for new factories
+const DEFAULT_ENERGY_BALANCE = 1000;
+const DEFAULT_CURRENCY_BALANCE = 500;
+const DEFAULT_ENERGY_TYPE = 'solar';
 
 // Simple in-memory rate limiter for authentication endpoints
 const rateLimitStore = new Map();
@@ -191,28 +198,29 @@ function parseResult(result, defaultValue = null) {
  * Generate a unique factory ID
  */
 function generateFactoryId() {
-    return 'Factory_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    return 'Factory_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
 }
 
 /**
  * Generate a unique offer ID
  */
 function generateOfferId() {
-    return 'Offer_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    return 'Offer_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
 }
 
 /**
  * Generate a unique trade ID
  */
 function generateTradeId() {
-    return 'Trade_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    return 'Trade_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
 }
 
 /**
- * Generate a fake blockchain transaction hash
+ * Generate a simulated blockchain transaction hash for backward compatibility
+ * Note: These are not real blockchain transactions, just identifiers for audit/debugging
  */
 function generateFakeBlockchainHash() {
-    return '0x' + [...Array(64)].map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+    return '0x' + crypto.randomBytes(32).toString('hex');
 }
 
 /**
@@ -1401,7 +1409,7 @@ app.post('/signup', signupRateLimiter, async (req, res) => {
                 INSERT INTO factory_trading_data 
                 (factory_id, energy_balance, currency_balance, daily_consumption, available_energy, current_generation, current_consumption, energy_type) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            `, [factoryId, 1000, 500, 0, 0, 0, 0, energy_source || 'solar']);
+            `, [factoryId, DEFAULT_ENERGY_BALANCE, DEFAULT_CURRENCY_BALANCE, 0, 0, 0, 0, energy_source || DEFAULT_ENERGY_TYPE]);
 
             await pgClient.query('COMMIT');
             console.log('Factory registered in PostgreSQL:', email);
@@ -1965,7 +1973,7 @@ app.post('/seed', async (req, res) => {
                     INSERT INTO factory_trading_data 
                     (factory_id, energy_balance, currency_balance, daily_consumption, available_energy, current_generation, current_consumption, energy_type) 
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                `, [factoryId, 1000, 500, 100, 800, 200, 150, factory.energy_source]);
+                `, [factoryId, DEFAULT_ENERGY_BALANCE, DEFAULT_CURRENCY_BALANCE, 100, 800, 200, 150, factory.energy_source]);
 
                 await pgClient.query('COMMIT');
 

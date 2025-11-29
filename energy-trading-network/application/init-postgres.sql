@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE,
-    blockchain_tx_hash VARCHAR(255),  -- Optional: for fake blockchain reference
+    blockchain_tx_hash VARCHAR(255),  -- Simulated blockchain hash for backward compatibility (not a real blockchain reference)
     CONSTRAINT valid_status CHECK (status IN ('pending', 'active', 'completed', 'cancelled'))
 );
 
