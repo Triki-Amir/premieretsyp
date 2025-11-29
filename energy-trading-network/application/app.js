@@ -1,22 +1,31 @@
 /**
  * Energy Trading Application
- * Unified application for factories to interact with the blockchain
- * Provides REST API endpoints for energy token operations and mobile app authentication
+ * Unified application for factories to trade energy
+ * Provides REST API endpoints for energy trading operations and mobile app authentication
  * 
  * DATABASE ARCHITECTURE:
- * - PostgreSQL: Stores authentication credentials and non-essential factory info
- *   (login data, profiles, login history, password resets)
- * - CouchDB (via Hyperledger Fabric): Stores trading data on the blockchain
- *   (energy balance, currency, trades, offers - immutable ledger)
+ * - PostgreSQL: Primary data store for all factory and trading data
+ *   (credentials, profiles, trading data, energy balances, trades, offers)
+ * - Blockchain: Optional/simulated for backward compatibility
+ *   (All blockchain operations are faked and stored in PostgreSQL)
  */
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { Gateway, Wallets } = require('fabric-network');
 const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
+
+// Try to load fabric-network, but make it optional
+let Gateway, Wallets;
+try {
+    const fabricNetwork = require('fabric-network');
+    Gateway = fabricNetwork.Gateway;
+    Wallets = fabricNetwork.Wallets;
+} catch (e) {
+    console.log('⚠️  fabric-network not available, running in PostgreSQL-only mode');
+}
 
 // Simple in-memory rate limiter for authentication endpoints
 const rateLimitStore = new Map();
@@ -71,7 +80,7 @@ function rateLimiter(maxAttempts) {
 const loginRateLimiter = rateLimiter(MAX_LOGIN_ATTEMPTS);
 const signupRateLimiter = rateLimiter(MAX_SIGNUP_ATTEMPTS);
 
-// PostgreSQL connection pool for credentials and non-essential data
+// PostgreSQL connection pool - PRIMARY data store
 const pgPool = new Pool({
     host: process.env.PG_HOST || 'localhost',
     port: parseInt(process.env.PG_PORT) || 5432,
@@ -93,7 +102,7 @@ let pgConnectionPromise = pgPool.connect()
         return true;
     })
     .catch(err => {
-        console.log('⚠️  PostgreSQL not available, falling back to blockchain-only mode');
+        console.log('⚠️  PostgreSQL not available');
         console.log('   To enable PostgreSQL: npm run db:start');
         pgConnected = false;
         return false;
@@ -161,6 +170,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const CHANNEL_NAME = 'energychannel';
 const CHAINCODE_NAME = 'energytoken';
+const USE_BLOCKCHAIN = process.env.USE_BLOCKCHAIN === 'true'; // Default: false (use PostgreSQL only)
 
 /**
  * Safely parse chaincode evaluateTransaction results which may be empty
@@ -199,11 +209,23 @@ function generateTradeId() {
 }
 
 /**
- * Get network connection and contract
+ * Generate a fake blockchain transaction hash
+ */
+function generateFakeBlockchainHash() {
+    return '0x' + [...Array(64)].map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+}
+
+/**
+ * Get network connection and contract (only if blockchain is enabled)
  * @param {string} factoryId - Factory identifier for wallet lookup
- * @returns {Object} Contract instance
+ * @returns {Object} Contract instance or null if blockchain disabled
  */
 async function getContract(factoryId = 'admin') {
+    // If blockchain is disabled or fabric-network not available, return null
+    if (!USE_BLOCKCHAIN || !Gateway || !Wallets) {
+        return null;
+    }
+    
     try {
         // Load connection profile
         const ccpPath = path.resolve(
@@ -245,7 +267,8 @@ async function getContract(factoryId = 'admin') {
 
         return { contract, gateway };
     } catch (error) {
-        throw new Error(`Failed to connect to network: ${error.message}`);
+        console.log('Blockchain not available, using PostgreSQL only');
+        return null;
     }
 }
 
@@ -257,15 +280,16 @@ app.get('/api/health', async (req, res) => {
     res.json({ 
         status: 'OK', 
         message: 'Energy Trading API is running',
+        mode: USE_BLOCKCHAIN ? 'hybrid' : 'postgresql-only',
         databases: {
             postgresql: {
                 status: pgStatus ? 'connected' : 'not available',
-                purpose: 'Credentials & profiles storage'
+                purpose: 'Primary data store (credentials, profiles, trading data, trades, offers)'
             },
             blockchain: {
-                status: 'configured',
-                type: 'CouchDB via Hyperledger Fabric',
-                purpose: 'Trading data (energy, currency, trades)'
+                status: USE_BLOCKCHAIN ? 'enabled' : 'simulated',
+                type: USE_BLOCKCHAIN ? 'CouchDB via Hyperledger Fabric' : 'Simulated (PostgreSQL backend)',
+                purpose: 'Trading data (blockchain operations are simulated in PostgreSQL)'
             }
         },
         timestamp: new Date().toISOString()
@@ -305,23 +329,68 @@ app.post('/api/factory/register', async (req, res) => {
             return res.status(400).json({ error: 'availableEnergy must be a non-negative number' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        // Store trading data in PostgreSQL
+        if (pgAvailable) {
+            // Check if factory exists
+            const existCheck = await pgPool.query(
+                'SELECT factory_id FROM factory_trading_data WHERE factory_id = $1',
+                [factoryId]
+            );
+            
+            if (existCheck.rows.length > 0) {
+                // Update existing trading data
+                await pgPool.query(`
+                    UPDATE factory_trading_data SET
+                        energy_balance = $2,
+                        currency_balance = $3,
+                        daily_consumption = $4,
+                        available_energy = $5,
+                        energy_type = $6,
+                        updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [factoryId, initBalNum, currencyBalNum, dailyConsNum, availableNum, energyType]);
+            } else {
+                // First ensure factory exists in credentials
+                const credCheck = await pgPool.query(
+                    'SELECT factory_id FROM factories_credentials WHERE factory_id = $1',
+                    [factoryId]
+                );
+                
+                if (credCheck.rows.length === 0) {
+                    return res.status(400).json({ error: 'Factory credentials not found. Please signup first.' });
+                }
+                
+                // Insert new trading data
+                await pgPool.query(`
+                    INSERT INTO factory_trading_data 
+                    (factory_id, energy_balance, currency_balance, daily_consumption, available_energy, energy_type)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                `, [factoryId, initBalNum, currencyBalNum, dailyConsNum, availableNum, energyType]);
+            }
+        }
 
-        // Submit transaction (include new fields)
-        await contract.submitTransaction(
-            'RegisterFactory',
-            factoryId,
-            name,
-            initBalNum.toString(),
-            energyType,
-            currencyBalNum.toString(),
-            dailyConsNum.toString(),
-            availableNum.toString()
-        );
-
-        // Disconnect
-        await gateway.disconnect();
+        // Optionally replicate to blockchain if enabled
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction(
+                    'RegisterFactory',
+                    factoryId,
+                    name,
+                    initBalNum.toString(),
+                    energyType,
+                    currencyBalNum.toString(),
+                    dailyConsNum.toString(),
+                    availableNum.toString()
+                );
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({
             success: true,
@@ -334,7 +403,8 @@ app.post('/api/factory/register', async (req, res) => {
                 currencyBalance: currencyBalNum,
                 dailyConsumption: dailyConsNum,
                 availableEnergy: availableNum
-            }
+            },
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -355,18 +425,36 @@ app.post('/api/energy/mint', async (req, res) => {
             return res.status(400).json({ error: 'Invalid factoryId or amount' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            // Update energy balance in PostgreSQL
+            await pgPool.query(`
+                UPDATE factory_trading_data 
+                SET energy_balance = energy_balance + $2,
+                    available_energy = available_energy + $2,
+                    updated_at = NOW()
+                WHERE factory_id = $1
+            `, [factoryId, amount]);
+        }
 
-        // Submit transaction to mint tokens
-        await contract.submitTransaction('MintEnergyTokens', factoryId, amount.toString());
-
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('MintEnergyTokens', factoryId, amount.toString());
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({ 
             success: true, 
             message: `Minted ${amount} kWh of energy tokens for ${factoryId}`,
-            data: { factoryId, amount }
+            data: { factoryId, amount },
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -387,19 +475,72 @@ app.post('/api/energy/transfer', async (req, res) => {
             return res.status(400).json({ error: 'Invalid input parameters' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const pgClient = await pgPool.connect();
+            try {
+                await pgClient.query('BEGIN');
+                
+                // Check if sender has enough energy
+                const senderResult = await pgClient.query(
+                    'SELECT energy_balance FROM factory_trading_data WHERE factory_id = $1',
+                    [fromFactoryId]
+                );
+                
+                if (senderResult.rows.length === 0) {
+                    throw new Error('Sender factory not found');
+                }
+                
+                const senderBalance = parseFloat(senderResult.rows[0].energy_balance);
+                if (senderBalance < amount) {
+                    throw new Error('Insufficient energy balance');
+                }
+                
+                // Deduct from sender
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance - $2,
+                        available_energy = available_energy - $2,
+                        updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [fromFactoryId, amount]);
+                
+                // Add to receiver
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance + $2,
+                        available_energy = available_energy + $2,
+                        updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [toFactoryId, amount]);
+                
+                await pgClient.query('COMMIT');
+            } catch (e) {
+                await pgClient.query('ROLLBACK');
+                throw e;
+            } finally {
+                pgClient.release();
+            }
+        }
 
-        // Submit transaction
-        await contract.submitTransaction('TransferEnergy', fromFactoryId, toFactoryId, 
-            amount.toString());
-
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('TransferEnergy', fromFactoryId, toFactoryId, amount.toString());
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({ 
             success: true, 
             message: `Transferred ${amount} kWh from ${fromFactoryId} to ${toFactoryId}`,
-            data: { fromFactoryId, toFactoryId, amount }
+            data: { fromFactoryId, toFactoryId, amount },
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -413,27 +554,47 @@ app.post('/api/energy/transfer', async (req, res) => {
  */
 app.post('/api/trade/create', async (req, res) => {
     try {
-        const { tradeId, sellerId, buyerId, amount, pricePerUnit } = req.body;
+        let { tradeId, sellerId, buyerId, amount, pricePerUnit } = req.body;
 
         // Validate input
-        if (!tradeId || !sellerId || !buyerId || !amount || !pricePerUnit) {
+        if (!sellerId || !buyerId || !amount || !pricePerUnit) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        // Generate trade ID if not provided
+        if (!tradeId) {
+            tradeId = generateTradeId();
+        }
 
-        // Submit transaction
-        await contract.submitTransaction('CreateEnergyTrade', tradeId, sellerId, buyerId, 
-            amount.toString(), pricePerUnit.toString());
+        const totalPrice = parseFloat(amount) * parseFloat(pricePerUnit);
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            // Insert trade into PostgreSQL
+            await pgPool.query(`
+                INSERT INTO trades (trade_id, seller_factory_id, buyer_factory_id, energy_amount, price_per_kwh, total_price, status, blockchain_tx_hash)
+                VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+            `, [tradeId, sellerId, buyerId, amount, pricePerUnit, totalPrice, generateFakeBlockchainHash()]);
+        }
 
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('CreateEnergyTrade', tradeId, sellerId, buyerId, 
+                    amount.toString(), pricePerUnit.toString());
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
-        const totalPrice = amount * pricePerUnit;
         res.json({ 
             success: true, 
             message: `Trade ${tradeId} created successfully`,
-            data: { tradeId, sellerId, buyerId, amount, pricePerUnit, totalPrice }
+            data: { tradeId, sellerId, buyerId, amount, pricePerUnit, totalPrice },
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -453,18 +614,106 @@ app.post('/api/trade/execute', async (req, res) => {
             return res.status(400).json({ error: 'Trade ID is required' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const pgClient = await pgPool.connect();
+            try {
+                await pgClient.query('BEGIN');
+                
+                // Get trade details
+                const tradeResult = await pgClient.query(
+                    'SELECT * FROM trades WHERE trade_id = $1 AND status = $2',
+                    [tradeId, 'pending']
+                );
+                
+                if (tradeResult.rows.length === 0) {
+                    throw new Error('Trade not found or already executed');
+                }
+                
+                const trade = tradeResult.rows[0];
+                const amount = parseFloat(trade.energy_amount);
+                const totalPrice = parseFloat(trade.total_price);
+                
+                // Check seller has enough energy
+                const sellerResult = await pgClient.query(
+                    'SELECT energy_balance FROM factory_trading_data WHERE factory_id = $1',
+                    [trade.seller_factory_id]
+                );
+                
+                if (sellerResult.rows.length === 0 || parseFloat(sellerResult.rows[0].energy_balance) < amount) {
+                    throw new Error('Seller has insufficient energy balance');
+                }
+                
+                // Check buyer has enough currency
+                const buyerResult = await pgClient.query(
+                    'SELECT currency_balance FROM factory_trading_data WHERE factory_id = $1',
+                    [trade.buyer_factory_id]
+                );
+                
+                if (buyerResult.rows.length === 0 || parseFloat(buyerResult.rows[0].currency_balance) < totalPrice) {
+                    throw new Error('Buyer has insufficient currency balance');
+                }
+                
+                // Transfer energy from seller to buyer
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance - $2, available_energy = available_energy - $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.seller_factory_id, amount]);
+                
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance + $2, available_energy = available_energy + $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.buyer_factory_id, amount]);
+                
+                // Transfer currency from buyer to seller
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET currency_balance = currency_balance - $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.buyer_factory_id, totalPrice]);
+                
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET currency_balance = currency_balance + $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.seller_factory_id, totalPrice]);
+                
+                // Update trade status to completed
+                await pgClient.query(`
+                    UPDATE trades 
+                    SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+                    WHERE trade_id = $1
+                `, [tradeId]);
+                
+                await pgClient.query('COMMIT');
+            } catch (e) {
+                await pgClient.query('ROLLBACK');
+                throw e;
+            } finally {
+                pgClient.release();
+            }
+        }
 
-        // Submit transaction
-        await contract.submitTransaction('ExecuteTrade', tradeId);
-
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('ExecuteTrade', tradeId);
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({ 
             success: true, 
             message: `Trade ${tradeId} executed successfully`,
-            data: { tradeId }
+            data: { tradeId },
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -478,21 +727,60 @@ app.post('/api/trade/execute', async (req, res) => {
 app.get('/api/factory/:factoryId', async (req, res) => {
     try {
         const { factoryId } = req.params;
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query factory data
-        const result = await contract.evaluateTransaction('GetFactory', factoryId);
-        const factory = parseResult(result, null);
-
-        await gateway.disconnect();
-
-        if (factory === null) {
-            res.status(404).json({ error: 'Factory not found or empty response from chaincode' });
-        } else {
-            res.json({ success: true, data: factory });
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            // Get factory data from PostgreSQL
+            const result = await pgPool.query(`
+                SELECT fc.factory_id, fc.email, fc.fiscal_matricule,
+                       fp.factory_name, fp.localisation, fp.contact_info, fp.energy_capacity,
+                       ftd.energy_balance, ftd.currency_balance, ftd.daily_consumption, 
+                       ftd.available_energy, ftd.current_generation, ftd.current_consumption, ftd.energy_type,
+                       fc.created_at
+                FROM factories_credentials fc
+                LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id
+                LEFT JOIN factory_trading_data ftd ON fc.factory_id = ftd.factory_id
+                WHERE fc.factory_id = $1
+            `, [factoryId]);
+            
+            if (result.rows.length > 0) {
+                const row = result.rows[0];
+                const factory = {
+                    id: row.factory_id,
+                    name: row.factory_name,
+                    email: row.email,
+                    localisation: row.localisation,
+                    fiscalMatricule: row.fiscal_matricule,
+                    energyCapacity: row.energy_capacity,
+                    contactInfo: row.contact_info,
+                    energyBalance: parseFloat(row.energy_balance) || 0,
+                    currencyBalance: parseFloat(row.currency_balance) || 0,
+                    dailyConsumption: parseFloat(row.daily_consumption) || 0,
+                    availableEnergy: parseFloat(row.available_energy) || 0,
+                    currentGeneration: parseFloat(row.current_generation) || 0,
+                    currentConsumption: parseFloat(row.current_consumption) || 0,
+                    energyType: row.energy_type,
+                    createdAt: row.created_at
+                };
+                return res.json({ success: true, data: factory });
+            }
         }
+
+        // Fallback to blockchain if enabled
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetFactory', factoryId);
+            const factory = parseResult(result, null);
+            await gateway.disconnect();
+
+            if (factory !== null) {
+                return res.json({ success: true, data: factory });
+            }
+        }
+        
+        res.status(404).json({ error: 'Factory not found' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -505,22 +793,36 @@ app.get('/api/factory/:factoryId', async (req, res) => {
 app.get('/api/factory/:factoryId/balance', async (req, res) => {
     try {
         const { factoryId } = req.params;
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query balance
-        const result = await contract.evaluateTransaction('GetEnergyBalance', factoryId);
-        const s = result ? result.toString() : '';
-        if (!s || s.trim().length === 0) {
-            await gateway.disconnect();
-            return res.status(404).json({ error: 'Balance not found or empty response from chaincode' });
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(
+                'SELECT energy_balance FROM factory_trading_data WHERE factory_id = $1',
+                [factoryId]
+            );
+            
+            if (result.rows.length > 0) {
+                const balance = parseFloat(result.rows[0].energy_balance);
+                return res.json({ success: true, data: { factoryId, balance } });
+            }
         }
-        const balance = parseFloat(s);
 
-        await gateway.disconnect();
-
-        res.json({ success: true, data: { factoryId, balance } });
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetEnergyBalance', factoryId);
+            const s = result ? result.toString() : '';
+            await gateway.disconnect();
+            
+            if (s && s.trim().length > 0) {
+                const balance = parseFloat(s);
+                return res.json({ success: true, data: { factoryId, balance } });
+            }
+        }
+        
+        res.status(404).json({ error: 'Balance not found' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -533,22 +835,36 @@ app.get('/api/factory/:factoryId/balance', async (req, res) => {
 app.get('/api/factory/:factoryId/available-energy', async (req, res) => {
     try {
         const { factoryId } = req.params;
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query available energy
-        const result = await contract.evaluateTransaction('GetAvailableEnergy', factoryId);
-        const s = result ? result.toString() : '';
-        if (!s || s.trim().length === 0) {
-            await gateway.disconnect();
-            return res.status(404).json({ error: 'Available energy not found or empty response from chaincode' });
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(
+                'SELECT available_energy FROM factory_trading_data WHERE factory_id = $1',
+                [factoryId]
+            );
+            
+            if (result.rows.length > 0) {
+                const availableEnergy = parseFloat(result.rows[0].available_energy);
+                return res.json({ success: true, data: { factoryId, availableEnergy } });
+            }
         }
-        const availableEnergy = parseFloat(s);
 
-        await gateway.disconnect();
-
-        res.json({ success: true, data: { factoryId, availableEnergy } });
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetAvailableEnergy', factoryId);
+            const s = result ? result.toString() : '';
+            await gateway.disconnect();
+            
+            if (s && s.trim().length > 0) {
+                const availableEnergy = parseFloat(s);
+                return res.json({ success: true, data: { factoryId, availableEnergy } });
+            }
+        }
+        
+        res.status(404).json({ error: 'Available energy not found' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -561,21 +877,45 @@ app.get('/api/factory/:factoryId/available-energy', async (req, res) => {
 app.get('/api/factory/:factoryId/energy-status', async (req, res) => {
     try {
         const { factoryId } = req.params;
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query energy status
-        const result = await contract.evaluateTransaction('GetEnergyStatus', factoryId);
-        const status = parseResult(result, null);
-
-        await gateway.disconnect();
-
-        if (status === null) {
-            res.status(404).json({ error: 'Energy status not found or empty response from chaincode' });
-        } else {
-            res.json({ success: true, data: status });
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(
+                'SELECT available_energy, daily_consumption FROM factory_trading_data WHERE factory_id = $1',
+                [factoryId]
+            );
+            
+            if (result.rows.length > 0) {
+                const availableEnergy = parseFloat(result.rows[0].available_energy) || 0;
+                const dailyConsumption = parseFloat(result.rows[0].daily_consumption) || 0;
+                const difference = availableEnergy - dailyConsumption;
+                
+                const status = {
+                    factoryId,
+                    availableEnergy,
+                    dailyConsumption,
+                    difference,
+                    status: difference > 0 ? 'surplus' : (difference < 0 ? 'deficit' : 'balanced')
+                };
+                return res.json({ success: true, data: status });
+            }
         }
+
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetEnergyStatus', factoryId);
+            const status = parseResult(result, null);
+            await gateway.disconnect();
+
+            if (status !== null) {
+                return res.json({ success: true, data: status });
+            }
+        }
+        
+        res.status(404).json({ error: 'Energy status not found' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -595,13 +935,27 @@ app.put('/api/factory/:factoryId/available-energy', async (req, res) => {
             return res.status(400).json({ error: 'Invalid availableEnergy value' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            await pgPool.query(`
+                UPDATE factory_trading_data 
+                SET available_energy = $2, updated_at = NOW()
+                WHERE factory_id = $1
+            `, [factoryId, availableEnergy]);
+        }
 
-        // Submit transaction
-        await contract.submitTransaction('UpdateAvailableEnergy', factoryId, availableEnergy.toString());
-
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('UpdateAvailableEnergy', factoryId, availableEnergy.toString());
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({
             success: true,
@@ -627,13 +981,27 @@ app.put('/api/factory/:factoryId/daily-consumption', async (req, res) => {
             return res.status(400).json({ error: 'Invalid dailyConsumption value' });
         }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            await pgPool.query(`
+                UPDATE factory_trading_data 
+                SET daily_consumption = $2, updated_at = NOW()
+                WHERE factory_id = $1
+            `, [factoryId, dailyConsumption]);
+        }
 
-        // Submit transaction
-        await contract.submitTransaction('UpdateDailyConsumption', factoryId, dailyConsumption.toString());
-
-        await gateway.disconnect();
+        // Optionally replicate to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            try {
+                const { contract, gateway } = blockchainResult;
+                await contract.submitTransaction('UpdateDailyConsumption', factoryId, dailyConsumption.toString());
+                await gateway.disconnect();
+            } catch (e) {
+                console.log('Blockchain replication skipped:', e.message);
+            }
+        }
 
         res.json({
             success: true,
@@ -651,20 +1019,63 @@ app.put('/api/factory/:factoryId/daily-consumption', async (req, res) => {
  */
 app.get('/api/factories', async (req, res) => {
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(`
+                SELECT fc.factory_id, fc.email, fc.fiscal_matricule,
+                       fp.factory_name, fp.localisation, fp.contact_info, fp.energy_capacity,
+                       ftd.energy_balance, ftd.currency_balance, ftd.daily_consumption, 
+                       ftd.available_energy, ftd.current_generation, ftd.current_consumption, ftd.energy_type,
+                       fc.created_at
+                FROM factories_credentials fc
+                LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id
+                LEFT JOIN factory_trading_data ftd ON fc.factory_id = ftd.factory_id
+                WHERE fc.is_active = true
+                ORDER BY fc.created_at DESC
+            `);
+            
+            const factories = result.rows.map(row => ({
+                id: row.factory_id,
+                name: row.factory_name,
+                email: row.email,
+                localisation: row.localisation,
+                fiscalMatricule: row.fiscal_matricule,
+                energyCapacity: row.energy_capacity,
+                contactInfo: row.contact_info,
+                energyBalance: parseFloat(row.energy_balance) || 0,
+                currencyBalance: parseFloat(row.currency_balance) || 0,
+                dailyConsumption: parseFloat(row.daily_consumption) || 0,
+                availableEnergy: parseFloat(row.available_energy) || 0,
+                currentGeneration: parseFloat(row.current_generation) || 0,
+                currentConsumption: parseFloat(row.current_consumption) || 0,
+                energyType: row.energy_type,
+                createdAt: row.created_at
+            }));
+            
+            return res.json({ 
+                success: true, 
+                count: factories.length,
+                data: factories 
+            });
+        }
 
-        // Query all factories
-        const result = await contract.evaluateTransaction('GetAllFactories');
-        const factories = parseResult(result, []);
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetAllFactories');
+            const factories = parseResult(result, []);
+            await gateway.disconnect();
 
-        await gateway.disconnect();
-
-        res.json({ 
-            success: true, 
-            count: Array.isArray(factories) ? factories.length : 0,
-            data: factories 
-        });
+            return res.json({ 
+                success: true, 
+                count: Array.isArray(factories) ? factories.length : 0,
+                data: factories 
+            });
+        }
+        
+        res.json({ success: true, count: 0, data: [] });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -677,21 +1088,47 @@ app.get('/api/factories', async (req, res) => {
 app.get('/api/trade/:tradeId', async (req, res) => {
     try {
         const { tradeId } = req.params;
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query trade data
-        const result = await contract.evaluateTransaction('GetTrade', tradeId);
-        const trade = parseResult(result, null);
-
-        await gateway.disconnect();
-
-        if (trade === null) {
-            res.status(404).json({ error: 'Trade not found or empty response from chaincode' });
-        } else {
-            res.json({ success: true, data: trade });
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(
+                'SELECT * FROM trades WHERE trade_id = $1',
+                [tradeId]
+            );
+            
+            if (result.rows.length > 0) {
+                const row = result.rows[0];
+                const trade = {
+                    tradeId: row.trade_id,
+                    sellerId: row.seller_factory_id,
+                    buyerId: row.buyer_factory_id,
+                    amount: parseFloat(row.energy_amount),
+                    pricePerUnit: parseFloat(row.price_per_kwh),
+                    totalPrice: parseFloat(row.total_price),
+                    status: row.status,
+                    timestamp: row.created_at,
+                    completedAt: row.completed_at,
+                    blockchainTxHash: row.blockchain_tx_hash
+                };
+                return res.json({ success: true, data: trade });
+            }
         }
+
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetTrade', tradeId);
+            const trade = parseResult(result, null);
+            await gateway.disconnect();
+
+            if (trade !== null) {
+                return res.json({ success: true, data: trade });
+            }
+        }
+        
+        res.status(404).json({ error: 'Trade not found' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -704,17 +1141,49 @@ app.get('/api/trade/:tradeId', async (req, res) => {
 app.get('/api/factory/:factoryId/history', async (req, res) => {
     try {
         const { factoryId } = req.params;
+        
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            // Get trades where factory is either buyer or seller
+            const result = await pgPool.query(`
+                SELECT t.*, 
+                       seller_fp.factory_name as seller_name,
+                       buyer_fp.factory_name as buyer_name
+                FROM trades t
+                LEFT JOIN factory_profiles seller_fp ON t.seller_factory_id = seller_fp.factory_id
+                LEFT JOIN factory_profiles buyer_fp ON t.buyer_factory_id = buyer_fp.factory_id
+                WHERE t.seller_factory_id = $1 OR t.buyer_factory_id = $1
+                ORDER BY t.created_at DESC
+                LIMIT 100
+            `, [factoryId]);
+            
+            const history = result.rows.map(row => ({
+                tradeId: row.trade_id,
+                type: row.seller_factory_id === factoryId ? 'sell' : 'buy',
+                counterparty: row.seller_factory_id === factoryId ? row.buyer_name : row.seller_name,
+                amount: parseFloat(row.energy_amount),
+                pricePerUnit: parseFloat(row.price_per_kwh),
+                totalPrice: parseFloat(row.total_price),
+                status: row.status,
+                timestamp: row.created_at
+            }));
+            
+            return res.json({ success: true, data: history });
+        }
 
-        // Connect to network
-        const { contract, gateway } = await getContract();
+        // Fallback to blockchain
+        const blockchainResult = await getContract();
+        if (blockchainResult) {
+            const { contract, gateway } = blockchainResult;
+            const result = await contract.evaluateTransaction('GetFactoryHistory', factoryId);
+            const history = parseResult(result, []);
+            await gateway.disconnect();
 
-        // Query history
-        const result = await contract.evaluateTransaction('GetFactoryHistory', factoryId);
-        const history = parseResult(result, []);
-
-        await gateway.disconnect();
-
-        res.json({ success: true, data: history });
+            return res.json({ success: true, data: history });
+        }
+        
+        res.json({ success: true, data: [] });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -728,16 +1197,17 @@ app.get('/test', async (req, res) => {
     const pgStatus = await isPgConnected();
     res.json({ 
         message: 'Backend is working!',
+        mode: USE_BLOCKCHAIN ? 'hybrid' : 'postgresql-only',
         databases: {
-            postgresql: pgStatus ? 'connected' : 'not available (credentials stored in blockchain)',
-            blockchain: 'CouchDB via Hyperledger Fabric'
+            postgresql: pgStatus ? 'connected' : 'not available',
+            blockchain: USE_BLOCKCHAIN ? 'CouchDB via Hyperledger Fabric' : 'Simulated (PostgreSQL backend)'
         }
     });
 });
 
 /**
  * Login Endpoint - Authenticate factory user
- * Uses PostgreSQL for credentials if available, falls back to blockchain
+ * Uses PostgreSQL for credentials and trading data
  * Rate limited to prevent brute-force attacks
  * POST /login
  * Body: { email, password }
@@ -755,15 +1225,11 @@ app.post('/login', loginRateLimiter, async (req, res) => {
             return res.status(400).send({ error: 'Email and password are required.' });
         }
 
-        let factory = null;
-        let passwordHash = null;
-        let factoryId = null;
-
-        // Try PostgreSQL first for credentials (with proper synchronization)
+        // Try PostgreSQL for credentials
         const pgAvailable = await isPgConnected();
         if (pgAvailable) {
             try {
-                // SQL query for fetching credentials with profile data
+                // SQL query for fetching credentials with profile and trading data
                 const credentialQuery = `
                     SELECT 
                         fc.factory_id, 
@@ -773,17 +1239,23 @@ app.post('/login', loginRateLimiter, async (req, res) => {
                         fp.localisation, 
                         fc.fiscal_matricule, 
                         fp.energy_capacity, 
-                        fp.contact_info 
+                        fp.contact_info,
+                        ftd.energy_balance,
+                        ftd.currency_balance,
+                        ftd.current_generation,
+                        ftd.current_consumption,
+                        ftd.energy_type
                     FROM factories_credentials fc 
                     LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id 
+                    LEFT JOIN factory_trading_data ftd ON fc.factory_id = ftd.factory_id
                     WHERE fc.email = $1 AND fc.is_active = true
                 `;
                 const credResult = await pgPool.query(credentialQuery, [email]);
                 
                 if (credResult.rows.length > 0) {
                     const cred = credResult.rows[0];
-                    factoryId = cred.factory_id;
-                    passwordHash = cred.password_hash;
+                    const factoryId = cred.factory_id;
+                    const passwordHash = cred.password_hash;
                     
                     // Verify password
                     const isPasswordValid = await bcrypt.compare(password, passwordHash);
@@ -807,103 +1279,37 @@ app.post('/login', loginRateLimiter, async (req, res) => {
                         [factoryId]
                     );
 
-                    // Get trading data from blockchain
-                    try {
-                        const { contract, gateway } = await getContract();
-                        const result = await contract.evaluateTransaction('GetFactory', factoryId);
-                        const blockchainData = parseResult(result, {});
-                        await gateway.disconnect();
-
-                        console.log('Login successful for:', email, '(PostgreSQL + Blockchain)');
-                        return res.status(200).send({ 
-                            message: 'Login successful!',
-                            factory: {
-                                id: factoryId,
-                                factory_name: cred.factory_name,
-                                email: cred.email,
-                                localisation: cred.localisation,
-                                fiscal_matricule: cred.fiscal_matricule,
-                                energy_capacity: cred.energy_capacity,
-                                contact_info: cred.contact_info,
-                                energy_source: blockchainData.energyType || '',
-                                energy_balance: blockchainData.energyBalance || 0,
-                                current_generation: blockchainData.currentGeneration || 0,
-                                current_consumption: blockchainData.currentConsumption || 0,
-                                currency_balance: blockchainData.currencyBalance || 0
-                            }
-                        });
-                    } catch (blockchainErr) {
-                        // Return with profile data only if blockchain is not available
-                        console.log('Login successful for:', email, '(PostgreSQL only - blockchain not available)');
-                        return res.status(200).send({ 
-                            message: 'Login successful!',
-                            factory: {
-                                id: factoryId,
-                                factory_name: cred.factory_name,
-                                email: cred.email,
-                                localisation: cred.localisation,
-                                fiscal_matricule: cred.fiscal_matricule,
-                                energy_capacity: cred.energy_capacity,
-                                contact_info: cred.contact_info,
-                                energy_source: '',
-                                energy_balance: 0,
-                                current_generation: 0,
-                                current_consumption: 0,
-                                currency_balance: 0
-                            },
-                            warning: 'Blockchain not available - trading data not loaded'
-                        });
-                    }
+                    console.log('Login successful for:', email, '(PostgreSQL)');
+                    return res.status(200).send({ 
+                        message: 'Login successful!',
+                        factory: {
+                            id: factoryId,
+                            factory_name: cred.factory_name,
+                            email: cred.email,
+                            localisation: cred.localisation,
+                            fiscal_matricule: cred.fiscal_matricule,
+                            energy_capacity: cred.energy_capacity,
+                            contact_info: cred.contact_info,
+                            energy_source: cred.energy_type || '',
+                            energy_balance: parseFloat(cred.energy_balance) || 0,
+                            current_generation: parseFloat(cred.current_generation) || 0,
+                            current_consumption: parseFloat(cred.current_consumption) || 0,
+                            currency_balance: parseFloat(cred.currency_balance) || 0
+                        }
+                    });
+                } else {
+                    console.log('Login failed: Email not found.');
+                    return res.status(401).send({ error: 'Invalid email or password.' });
                 }
             } catch (pgErr) {
-                console.log('PostgreSQL query failed, falling back to blockchain:', pgErr.message);
+                console.log('PostgreSQL query failed:', pgErr.message);
+                return res.status(500).send({ error: 'Database error during login.' });
             }
+        } else {
+            // PostgreSQL not available
+            console.log('Login failed: PostgreSQL not connected');
+            return res.status(503).send({ error: 'Database not available. Please try again later.' });
         }
-
-        // Fallback to blockchain for credentials
-        const { contract, gateway } = await getContract();
-
-        try {
-            const result = await contract.evaluateTransaction('GetFactoryByEmail', email);
-            factory = parseResult(result, null);
-        } catch (err) {
-            await gateway.disconnect();
-            console.log('Login failed: Email not found.');
-            return res.status(401).send({ error: 'Invalid email or password.' });
-        }
-
-        await gateway.disconnect();
-
-        if (!factory) {
-            console.log('Login failed: Email not found.');
-            return res.status(401).send({ error: 'Invalid email or password.' });
-        }
-
-        // Compare password with hashed password
-        const isPasswordValid = await bcrypt.compare(password, factory.passwordHash || '');
-
-        if (!isPasswordValid) {
-            console.log('Login failed: Invalid password.');
-            return res.status(401).send({ error: 'Invalid email or password.' });
-        }
-
-        console.log('Login successful for:', email, '(Blockchain only)');
-        res.status(200).send({ 
-            message: 'Login successful!',
-            factory: {
-                id: factory.id,
-                factory_name: factory.name,
-                email: factory.email,
-                localisation: factory.localisation,
-                fiscal_matricule: factory.fiscalMatricule,
-                energy_capacity: factory.energyCapacity,
-                contact_info: factory.contactInfo,
-                energy_source: factory.energyType,
-                energy_balance: factory.energyBalance || 0,
-                current_generation: factory.currentGeneration || 0,
-                current_consumption: factory.currentConsumption || 0
-            }
-        });
 
     } catch (error) {
         console.error('Error during login:', error);
@@ -913,8 +1319,7 @@ app.post('/login', loginRateLimiter, async (req, res) => {
 
 /**
  * Sign-Up Endpoint - Register new factory with authentication
- * Stores credentials in PostgreSQL, trading data in blockchain
- * Always stores password hash in blockchain as fallback for consistent authentication
+ * Stores all data in PostgreSQL
  * Rate limited to prevent abuse
  * POST /signup
  * Body: { factory_name, localisation, fiscal_matricule, energy_capacity, contact_info, energy_source, email, password }
@@ -949,124 +1354,72 @@ app.post('/signup', signupRateLimiter, async (req, res) => {
             return res.status(400).send({ error: 'Password must contain at least one letter and one number.' });
         }
 
+        const pgAvailable = await isPgConnected();
+        if (!pgAvailable) {
+            return res.status(503).send({ error: 'Database not available. Please try again later.' });
+        }
+
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
         // Generate unique factory ID
         const factoryId = generateFactoryId();
 
-        // Check PostgreSQL availability with proper synchronization
-        const pgAvailable = await isPgConnected();
-        let pgRegistered = false;
-
-        // Store credentials in PostgreSQL if available
-        if (pgAvailable) {
-            const pgClient = await pgPool.connect();
-            try {
-                await pgClient.query('BEGIN');
-
-                // Check if email or fiscal matricule already exists
-                const existCheckQuery = `
-                    SELECT email, fiscal_matricule 
-                    FROM factories_credentials 
-                    WHERE email = $1 OR fiscal_matricule = $2
-                `;
-                const existCheck = await pgClient.query(existCheckQuery, [email, fiscal_matricule]);
-                
-                if (existCheck.rows.length > 0) {
-                    await pgClient.query('ROLLBACK');
-                    return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
-                }
-
-                // Insert credentials
-                const insertCredQuery = `
-                    INSERT INTO factories_credentials 
-                    (factory_id, email, password_hash, fiscal_matricule) 
-                    VALUES ($1, $2, $3, $4)
-                `;
-                await pgClient.query(insertCredQuery, [factoryId, email, hashedPassword, fiscal_matricule]);
-
-                // Insert profile
-                const insertProfileQuery = `
-                    INSERT INTO factory_profiles 
-                    (factory_id, factory_name, localisation, contact_info, energy_capacity) 
-                    VALUES ($1, $2, $3, $4, $5)
-                `;
-                await pgClient.query(insertProfileQuery, [
-                    factoryId, 
-                    factory_name, 
-                    localisation || '', 
-                    contact_info || '', 
-                    energy_capacity || 0
-                ]);
-
-                await pgClient.query('COMMIT');
-                pgRegistered = true;
-                console.log('Credentials stored in PostgreSQL for:', email);
-            } catch (pgErr) {
-                await pgClient.query('ROLLBACK');
-                if (pgErr.code === '23505') { // Unique violation
-                    return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
-                }
-                throw pgErr;
-            } finally {
-                pgClient.release();
-            }
-        }
-
-        // Register trading data on blockchain
-        // Always store password hash in blockchain for fallback authentication
-        let blockchainRegistered = false;
+        const pgClient = await pgPool.connect();
         try {
-            const { contract, gateway } = await getContract();
+            await pgClient.query('BEGIN');
 
-            // Register factory with authentication via chaincode (stored in CouchDB)
-            // Always store password hash for consistent authentication even if PostgreSQL becomes unavailable
-            await contract.submitTransaction(
-                'RegisterFactoryWithAuth',
-                factoryId,
-                factory_name,
-                email,
-                hashedPassword, // Always store password hash in blockchain for fallback
-                localisation || '',
-                fiscal_matricule,
-                (energy_capacity || 0).toString(),
-                contact_info || '',
-                energy_source || '',
-                '0', // initialBalance
-                '0'  // currencyBalance
-            );
-
-            await gateway.disconnect();
-            blockchainRegistered = true;
-            console.log('Factory registered on blockchain:', factoryId);
-        } catch (blockchainErr) {
-            // If PostgreSQL was used but blockchain failed, we have partial registration
-            if (pgRegistered) {
-                console.log('Warning: Credentials stored in PostgreSQL but blockchain registration failed');
-                console.log('Factory registered successfully in PostgreSQL (blockchain pending):', email);
-                return res.status(201).send({ 
-                    message: 'Factory registered successfully! (Blockchain sync pending)',
-                    factoryId: factoryId,
-                    warning: 'Trading features will be available once blockchain is connected'
-                });
-            }
+            // Check if email or fiscal matricule already exists
+            const existCheckQuery = `
+                SELECT email, fiscal_matricule 
+                FROM factories_credentials 
+                WHERE email = $1 OR fiscal_matricule = $2
+            `;
+            const existCheck = await pgClient.query(existCheckQuery, [email, fiscal_matricule]);
             
-            if (blockchainErr.message.includes('already registered') || blockchainErr.message.includes('already exists')) {
+            if (existCheck.rows.length > 0) {
+                await pgClient.query('ROLLBACK');
                 return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
             }
-            throw blockchainErr;
-        }
 
-        console.log('Factory registered successfully:', email);
-        res.status(201).send({ 
-            message: 'Factory registered successfully!',
-            factoryId: factoryId,
-            storage: {
-                credentials: pgRegistered ? 'PostgreSQL + Blockchain' : 'Blockchain',
-                tradingData: 'Blockchain (CouchDB)'
+            // Insert credentials
+            await pgClient.query(`
+                INSERT INTO factories_credentials 
+                (factory_id, email, password_hash, fiscal_matricule) 
+                VALUES ($1, $2, $3, $4)
+            `, [factoryId, email, hashedPassword, fiscal_matricule]);
+
+            // Insert profile
+            await pgClient.query(`
+                INSERT INTO factory_profiles 
+                (factory_id, factory_name, localisation, contact_info, energy_capacity) 
+                VALUES ($1, $2, $3, $4, $5)
+            `, [factoryId, factory_name, localisation || '', contact_info || '', energy_capacity || 0]);
+
+            // Insert trading data with initial values
+            await pgClient.query(`
+                INSERT INTO factory_trading_data 
+                (factory_id, energy_balance, currency_balance, daily_consumption, available_energy, current_generation, current_consumption, energy_type) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `, [factoryId, 1000, 500, 0, 0, 0, 0, energy_source || 'solar']);
+
+            await pgClient.query('COMMIT');
+            console.log('Factory registered in PostgreSQL:', email);
+            
+            res.status(201).send({ 
+                message: 'Factory registered successfully!',
+                factoryId: factoryId,
+                blockchainTxHash: generateFakeBlockchainHash()
+            });
+        } catch (pgErr) {
+            await pgClient.query('ROLLBACK');
+            if (pgErr.code === '23505') { // Unique violation
+                return res.status(409).send({ error: 'Email or Fiscal Matricule already exists.' });
             }
-        });
+            throw pgErr;
+        } finally {
+            pgClient.release();
+        }
 
     } catch (error) {
         console.error('Error during signup:', error);
@@ -1083,35 +1436,44 @@ app.post('/signup', signupRateLimiter, async (req, res) => {
 app.get('/factories', async (req, res) => {
     console.log('Fetching all factories');
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query all factories from CouchDB via chaincode
-        const result = await contract.evaluateTransaction('GetAllFactories');
-        const factories = parseResult(result, []);
-
-        await gateway.disconnect();
-
-        // Transform to mobile app format
-        const transformedFactories = factories.map(f => ({
-            id: f.id,
-            factory_name: f.name,
-            localisation: f.localisation,
-            fiscal_matricule: f.fiscalMatricule,
-            energy_capacity: f.energyCapacity,
-            contact_info: f.contactInfo,
-            energy_source: f.energyType,
-            email: f.email,
-            energy_balance: f.energyBalance,
-            current_generation: f.currentGeneration,
-            current_consumption: f.currentConsumption,
-            created_at: f.createdAt
-        }));
+        const pgAvailable = await isPgConnected();
         
-        res.status(200).json({ 
-            success: true,
-            data: transformedFactories 
-        });
+        if (pgAvailable) {
+            const result = await pgPool.query(`
+                SELECT fc.factory_id, fc.email, fc.fiscal_matricule,
+                       fp.factory_name, fp.localisation, fp.contact_info, fp.energy_capacity,
+                       ftd.energy_balance, ftd.currency_balance, ftd.daily_consumption, 
+                       ftd.available_energy, ftd.current_generation, ftd.current_consumption, ftd.energy_type,
+                       fc.created_at
+                FROM factories_credentials fc
+                LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id
+                LEFT JOIN factory_trading_data ftd ON fc.factory_id = ftd.factory_id
+                WHERE fc.is_active = true
+                ORDER BY fc.created_at DESC
+            `);
+            
+            const transformedFactories = result.rows.map(row => ({
+                id: row.factory_id,
+                factory_name: row.factory_name,
+                localisation: row.localisation,
+                fiscal_matricule: row.fiscal_matricule,
+                energy_capacity: row.energy_capacity,
+                contact_info: row.contact_info,
+                energy_source: row.energy_type,
+                email: row.email,
+                energy_balance: parseFloat(row.energy_balance) || 0,
+                current_generation: parseFloat(row.current_generation) || 0,
+                current_consumption: parseFloat(row.current_consumption) || 0,
+                created_at: row.created_at
+            }));
+            
+            return res.status(200).json({ 
+                success: true,
+                data: transformedFactories 
+            });
+        }
+        
+        res.status(200).json({ success: true, data: [] });
     } catch (error) {
         console.error('Error fetching factories:', error);
         res.status(500).json({ error: 'Failed to fetch factories.' });
@@ -1126,43 +1488,44 @@ app.get('/factory/:id', async (req, res) => {
     const { id } = req.params;
     console.log('Fetching factory with ID:', id);
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query factory from CouchDB via chaincode
-        let factory;
-        try {
-            const result = await contract.evaluateTransaction('GetFactory', id);
-            factory = parseResult(result, null);
-        } catch (err) {
-            await gateway.disconnect();
-            return res.status(404).json({ error: 'Factory not found.' });
-        }
-
-        await gateway.disconnect();
-
-        if (!factory) {
-            return res.status(404).json({ error: 'Factory not found.' });
-        }
-
-        // Transform to mobile app format
-        res.status(200).json({ 
-            success: true,
-            data: {
-                id: factory.id,
-                factory_name: factory.name,
-                localisation: factory.localisation,
-                fiscal_matricule: factory.fiscalMatricule,
-                energy_capacity: factory.energyCapacity,
-                contact_info: factory.contactInfo,
-                energy_source: factory.energyType,
-                email: factory.email,
-                energy_balance: factory.energyBalance,
-                current_generation: factory.currentGeneration,
-                current_consumption: factory.currentConsumption,
-                created_at: factory.createdAt
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const result = await pgPool.query(`
+                SELECT fc.factory_id, fc.email, fc.fiscal_matricule,
+                       fp.factory_name, fp.localisation, fp.contact_info, fp.energy_capacity,
+                       ftd.energy_balance, ftd.currency_balance, ftd.daily_consumption, 
+                       ftd.available_energy, ftd.current_generation, ftd.current_consumption, ftd.energy_type,
+                       fc.created_at
+                FROM factories_credentials fc
+                LEFT JOIN factory_profiles fp ON fc.factory_id = fp.factory_id
+                LEFT JOIN factory_trading_data ftd ON fc.factory_id = ftd.factory_id
+                WHERE fc.factory_id = $1
+            `, [id]);
+            
+            if (result.rows.length > 0) {
+                const row = result.rows[0];
+                return res.status(200).json({ 
+                    success: true,
+                    data: {
+                        id: row.factory_id,
+                        factory_name: row.factory_name,
+                        localisation: row.localisation,
+                        fiscal_matricule: row.fiscal_matricule,
+                        energy_capacity: row.energy_capacity,
+                        contact_info: row.contact_info,
+                        energy_source: row.energy_type,
+                        email: row.email,
+                        energy_balance: parseFloat(row.energy_balance) || 0,
+                        current_generation: parseFloat(row.current_generation) || 0,
+                        current_consumption: parseFloat(row.current_consumption) || 0,
+                        created_at: row.created_at
+                    }
+                });
             }
-        });
+        }
+        
+        res.status(404).json({ error: 'Factory not found.' });
     } catch (error) {
         console.error('Error fetching factory:', error);
         res.status(500).json({ error: 'Failed to fetch factory.' });
@@ -1180,19 +1543,18 @@ app.put('/factory/:id/energy', async (req, res) => {
     
     console.log('Updating energy data for factory:', id);
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Update factory energy via chaincode (stored in CouchDB)
-        await contract.submitTransaction(
-            'UpdateFactoryEnergy',
-            id,
-            (energy_balance || 0).toString(),
-            (current_generation || 0).toString(),
-            (current_consumption || 0).toString()
-        );
-
-        await gateway.disconnect();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            await pgPool.query(`
+                UPDATE factory_trading_data 
+                SET energy_balance = $2, 
+                    current_generation = $3, 
+                    current_consumption = $4,
+                    updated_at = NOW()
+                WHERE factory_id = $1
+            `, [id, energy_balance || 0, current_generation || 0, current_consumption || 0]);
+        }
         
         res.status(200).json({ 
             success: true,
@@ -1213,43 +1575,39 @@ app.put('/factory/:id/energy', async (req, res) => {
 app.get('/offers', async (req, res) => {
     console.log('Fetching all offers');
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query all offers from CouchDB via chaincode
-        const offersResult = await contract.evaluateTransaction('GetAllOffers');
-        const offers = parseResult(offersResult, []);
-
-        // Get all factories to join data
-        const factoriesResult = await contract.evaluateTransaction('GetAllFactories');
-        const factories = parseResult(factoriesResult, []);
-        const factoryMap = {};
-        factories.forEach(f => { factoryMap[f.id] = f; });
-
-        await gateway.disconnect();
-
-        // Transform to mobile app format with factory details
-        const transformedOffers = offers.map(o => {
-            const factory = factoryMap[o.factoryId] || {};
-            return {
-                id: o.id,
-                factory_id: o.factoryId,
-                offer_type: o.offerType,
-                energy_amount: o.energyAmount,
-                price_per_kwh: o.pricePerKwh,
-                status: o.status,
-                created_at: o.createdAt,
-                updated_at: o.updatedAt,
-                factory_name: factory.name,
-                energy_source: factory.energyType,
-                localisation: factory.localisation
-            };
-        });
+        const pgAvailable = await isPgConnected();
         
-        res.status(200).json({ 
-            success: true,
-            data: transformedOffers 
-        });
+        if (pgAvailable) {
+            const result = await pgPool.query(`
+                SELECT o.*, fp.factory_name, ftd.energy_type, fp.localisation
+                FROM offers o
+                LEFT JOIN factory_profiles fp ON o.factory_id = fp.factory_id
+                LEFT JOIN factory_trading_data ftd ON o.factory_id = ftd.factory_id
+                WHERE o.status = 'active'
+                ORDER BY o.created_at DESC
+            `);
+            
+            const transformedOffers = result.rows.map(row => ({
+                id: row.offer_id,
+                factory_id: row.factory_id,
+                offer_type: row.offer_type,
+                energy_amount: parseFloat(row.energy_amount),
+                price_per_kwh: parseFloat(row.price_per_kwh),
+                status: row.status,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                factory_name: row.factory_name,
+                energy_source: row.energy_type,
+                localisation: row.localisation
+            }));
+            
+            return res.status(200).json({ 
+                success: true,
+                data: transformedOffers 
+            });
+        }
+        
+        res.status(200).json({ success: true, data: [] });
     } catch (error) {
         console.error('Error fetching offers:', error);
         res.status(500).json({ error: 'Failed to fetch offers.' });
@@ -1270,29 +1628,25 @@ app.post('/offers', async (req, res) => {
             return res.status(400).json({ error: 'All fields are required.' });
         }
 
-        // Generate unique offer ID
-        const offerId = generateOfferId();
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Create offer via chaincode (stored in CouchDB)
-        await contract.submitTransaction(
-            'CreateOffer',
-            offerId,
-            factory_id,
-            offer_type,
-            energy_amount.toString(),
-            price_per_kwh.toString()
-        );
-
-        await gateway.disconnect();
+        const pgAvailable = await isPgConnected();
         
-        res.status(201).json({ 
-            success: true,
-            message: 'Offer created successfully.',
-            offerId: offerId
-        });
+        if (pgAvailable) {
+            const offerId = generateOfferId();
+            
+            await pgPool.query(`
+                INSERT INTO offers (offer_id, factory_id, offer_type, energy_amount, price_per_kwh, status)
+                VALUES ($1, $2, $3, $4, $5, 'active')
+            `, [offerId, factory_id, offer_type, energy_amount, price_per_kwh]);
+            
+            return res.status(201).json({ 
+                success: true,
+                message: 'Offer created successfully.',
+                offerId: offerId,
+                blockchainTxHash: generateFakeBlockchainHash()
+            });
+        }
+        
+        res.status(503).json({ error: 'Database not available.' });
     } catch (error) {
         console.error('Error creating offer:', error);
         res.status(500).json({ error: 'Failed to create offer.' });
@@ -1310,13 +1664,13 @@ app.put('/offers/:id', async (req, res) => {
     
     console.log('Updating offer status:', id, status);
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Update offer status via chaincode (stored in CouchDB)
-        await contract.submitTransaction('UpdateOfferStatus', id, status);
-
-        await gateway.disconnect();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            await pgPool.query(`
+                UPDATE offers SET status = $2, updated_at = NOW() WHERE offer_id = $1
+            `, [id, status]);
+        }
         
         res.status(200).json({ 
             success: true,
@@ -1339,49 +1693,48 @@ app.get('/trades', async (req, res) => {
     console.log('Fetching trades, factory_id:', factory_id);
     
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Query all trades from CouchDB via chaincode
-        const tradesResult = await contract.evaluateTransaction('GetAllTrades');
-        let trades = parseResult(tradesResult, []);
-
-        // Get all factories to join data
-        const factoriesResult = await contract.evaluateTransaction('GetAllFactories');
-        const factories = parseResult(factoriesResult, []);
-        const factoryMap = {};
-        factories.forEach(f => { factoryMap[f.id] = f; });
-
-        await gateway.disconnect();
-
-        // Filter by factory_id if provided
-        if (factory_id) {
-            trades = trades.filter(t => t.sellerId === factory_id || t.buyerId === factory_id);
-        }
-
-        // Transform to mobile app format with factory names
-        const transformedTrades = trades.map(t => {
-            const seller = factoryMap[t.sellerId] || {};
-            const buyer = factoryMap[t.buyerId] || {};
-            return {
-                id: t.tradeId,
-                seller_factory_id: t.sellerId,
-                buyer_factory_id: t.buyerId,
-                energy_amount: t.amount,
-                price_per_kwh: t.pricePerUnit,
-                total_price: t.totalPrice,
-                status: t.status,
-                created_at: t.timestamp,
-                completed_at: t.status === 'completed' ? t.timestamp : null,
-                seller_name: seller.name,
-                buyer_name: buyer.name
-            };
-        });
+        const pgAvailable = await isPgConnected();
         
-        res.status(200).json({ 
-            success: true,
-            data: transformedTrades 
-        });
+        if (pgAvailable) {
+            let query = `
+                SELECT t.*, 
+                       seller_fp.factory_name as seller_name,
+                       buyer_fp.factory_name as buyer_name
+                FROM trades t
+                LEFT JOIN factory_profiles seller_fp ON t.seller_factory_id = seller_fp.factory_id
+                LEFT JOIN factory_profiles buyer_fp ON t.buyer_factory_id = buyer_fp.factory_id
+            `;
+            
+            const params = [];
+            if (factory_id) {
+                query += ' WHERE t.seller_factory_id = $1 OR t.buyer_factory_id = $1';
+                params.push(factory_id);
+            }
+            query += ' ORDER BY t.created_at DESC';
+            
+            const result = await pgPool.query(query, params);
+            
+            const transformedTrades = result.rows.map(row => ({
+                id: row.trade_id,
+                seller_factory_id: row.seller_factory_id,
+                buyer_factory_id: row.buyer_factory_id,
+                energy_amount: parseFloat(row.energy_amount),
+                price_per_kwh: parseFloat(row.price_per_kwh),
+                total_price: parseFloat(row.total_price),
+                status: row.status,
+                created_at: row.created_at,
+                completed_at: row.completed_at,
+                seller_name: row.seller_name,
+                buyer_name: row.buyer_name
+            }));
+            
+            return res.status(200).json({ 
+                success: true,
+                data: transformedTrades 
+            });
+        }
+        
+        res.status(200).json({ success: true, data: [] });
     } catch (error) {
         console.error('Error fetching trades:', error);
         res.status(500).json({ error: 'Failed to fetch trades.' });
@@ -1402,29 +1755,26 @@ app.post('/trades', async (req, res) => {
             return res.status(400).json({ error: 'All fields are required.' });
         }
 
-        // Generate unique trade ID
-        const tradeId = generateTradeId();
-
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Create trade via chaincode (stored in CouchDB)
-        await contract.submitTransaction(
-            'CreateEnergyTrade',
-            tradeId,
-            seller_factory_id,
-            buyer_factory_id,
-            energy_amount.toString(),
-            price_per_kwh.toString()
-        );
-
-        await gateway.disconnect();
+        const pgAvailable = await isPgConnected();
         
-        res.status(201).json({ 
-            success: true,
-            message: 'Trade created successfully.',
-            tradeId: tradeId 
-        });
+        if (pgAvailable) {
+            const tradeId = generateTradeId();
+            const totalPrice = parseFloat(energy_amount) * parseFloat(price_per_kwh);
+            
+            await pgPool.query(`
+                INSERT INTO trades (trade_id, seller_factory_id, buyer_factory_id, energy_amount, price_per_kwh, total_price, status, blockchain_tx_hash)
+                VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+            `, [tradeId, seller_factory_id, buyer_factory_id, energy_amount, price_per_kwh, totalPrice, generateFakeBlockchainHash()]);
+            
+            return res.status(201).json({ 
+                success: true,
+                message: 'Trade created successfully.',
+                tradeId: tradeId,
+                blockchainTxHash: generateFakeBlockchainHash()
+            });
+        }
+        
+        res.status(503).json({ error: 'Database not available.' });
     } catch (error) {
         console.error('Error creating trade:', error);
         res.status(500).json({ error: 'Failed to create trade.' });
@@ -1440,17 +1790,74 @@ app.post('/trades/:id/execute', async (req, res) => {
     console.log('Executing trade:', id);
     
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Execute trade via chaincode (updates CouchDB)
-        await contract.submitTransaction('ExecuteTrade', id);
-
-        await gateway.disconnect();
+        const pgAvailable = await isPgConnected();
+        
+        if (pgAvailable) {
+            const pgClient = await pgPool.connect();
+            try {
+                await pgClient.query('BEGIN');
+                
+                // Get trade details
+                const tradeResult = await pgClient.query(
+                    'SELECT * FROM trades WHERE trade_id = $1 AND status = $2',
+                    [id, 'pending']
+                );
+                
+                if (tradeResult.rows.length === 0) {
+                    await pgClient.query('ROLLBACK');
+                    return res.status(404).json({ error: 'Trade not found or already executed' });
+                }
+                
+                const trade = tradeResult.rows[0];
+                const amount = parseFloat(trade.energy_amount);
+                const totalPrice = parseFloat(trade.total_price);
+                
+                // Transfer energy from seller to buyer
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance - $2, available_energy = available_energy - $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.seller_factory_id, amount]);
+                
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET energy_balance = energy_balance + $2, available_energy = available_energy + $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.buyer_factory_id, amount]);
+                
+                // Transfer currency from buyer to seller
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET currency_balance = currency_balance - $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.buyer_factory_id, totalPrice]);
+                
+                await pgClient.query(`
+                    UPDATE factory_trading_data 
+                    SET currency_balance = currency_balance + $2, updated_at = NOW()
+                    WHERE factory_id = $1
+                `, [trade.seller_factory_id, totalPrice]);
+                
+                // Update trade status to completed
+                await pgClient.query(`
+                    UPDATE trades 
+                    SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+                    WHERE trade_id = $1
+                `, [id]);
+                
+                await pgClient.query('COMMIT');
+            } catch (e) {
+                await pgClient.query('ROLLBACK');
+                throw e;
+            } finally {
+                pgClient.release();
+            }
+        }
         
         res.status(200).json({ 
             success: true,
-            message: 'Trade executed successfully.' 
+            message: 'Trade executed successfully.',
+            blockchainTxHash: generateFakeBlockchainHash()
         });
     } catch (error) {
         console.error('Error executing trade:', error);
@@ -1466,14 +1873,14 @@ app.post('/trades/:id/execute', async (req, res) => {
  * Creates sample factories with authentication credentials for testing
  */
 app.post('/seed', async (req, res) => {
-    console.log('Seeding database with sample data (CouchDB via blockchain)...');
+    console.log('Seeding database with sample data (PostgreSQL)...');
     
     try {
-        // Connect to network
-        const { contract, gateway } = await getContract();
-
-        // Initialize ledger with sample factories via chaincode
-        await contract.submitTransaction('InitLedger');
+        const pgAvailable = await isPgConnected();
+        
+        if (!pgAvailable) {
+            return res.status(503).json({ error: 'Database not available for seeding.' });
+        }
 
         // Create sample factories with authentication for login testing
         const sampleFactories = [
@@ -1496,21 +1903,41 @@ app.post('/seed', async (req, res) => {
                 energy_capacity: 4000,
                 contact_info: '+216-555-0002',
                 energy_source: 'wind'
+            },
+            {
+                factory_name: 'Demo Hydro Factory',
+                email: 'demo@hydro.com',
+                password: 'Demo1234',
+                fiscal_matricule: 'FM-DEMO-HYDRO',
+                localisation: 'Sousse Industrial Zone',
+                energy_capacity: 6000,
+                contact_info: '+216-555-0003',
+                energy_source: 'hydro'
             }
         ];
 
         const createdFactories = [];
 
         for (const factory of sampleFactories) {
+            const pgClient = await pgPool.connect();
             try {
                 // Check if email already exists
-                try {
-                    await contract.evaluateTransaction('GetFactoryByEmail', factory.email);
+                const existCheck = await pgClient.query(
+                    'SELECT factory_id FROM factories_credentials WHERE email = $1',
+                    [factory.email]
+                );
+                
+                if (existCheck.rows.length > 0) {
                     console.log(`Factory with email ${factory.email} already exists, skipping.`);
-                    continue; // Skip if already exists
-                } catch (e) {
-                    // Factory doesn't exist, create it
+                    createdFactories.push({
+                        factoryId: existCheck.rows[0].factory_id,
+                        email: factory.email,
+                        password: factory.password
+                    });
+                    continue;
                 }
+
+                await pgClient.query('BEGIN');
 
                 // Hash password
                 const salt = await bcrypt.genSalt(10);
@@ -1519,21 +1946,28 @@ app.post('/seed', async (req, res) => {
                 // Generate unique factory ID
                 const factoryId = 'Factory_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
-                // Register factory with authentication
-                await contract.submitTransaction(
-                    'RegisterFactoryWithAuth',
-                    factoryId,
-                    factory.factory_name,
-                    factory.email,
-                    hashedPassword,
-                    factory.localisation || '',
-                    factory.fiscal_matricule,
-                    (factory.energy_capacity || 0).toString(),
-                    factory.contact_info || '',
-                    factory.energy_source || '',
-                    '1000', // initialBalance
-                    '500'   // currencyBalance
-                );
+                // Insert credentials
+                await pgClient.query(`
+                    INSERT INTO factories_credentials 
+                    (factory_id, email, password_hash, fiscal_matricule) 
+                    VALUES ($1, $2, $3, $4)
+                `, [factoryId, factory.email, hashedPassword, factory.fiscal_matricule]);
+
+                // Insert profile
+                await pgClient.query(`
+                    INSERT INTO factory_profiles 
+                    (factory_id, factory_name, localisation, contact_info, energy_capacity) 
+                    VALUES ($1, $2, $3, $4, $5)
+                `, [factoryId, factory.factory_name, factory.localisation, factory.contact_info, factory.energy_capacity]);
+
+                // Insert trading data with initial values
+                await pgClient.query(`
+                    INSERT INTO factory_trading_data 
+                    (factory_id, energy_balance, currency_balance, daily_consumption, available_energy, current_generation, current_consumption, energy_type) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                `, [factoryId, 1000, 500, 100, 800, 200, 150, factory.energy_source]);
+
+                await pgClient.query('COMMIT');
 
                 createdFactories.push({
                     factoryId,
@@ -1543,20 +1977,18 @@ app.post('/seed', async (req, res) => {
 
                 console.log(`Created sample factory: ${factory.factory_name} (${factory.email})`);
             } catch (err) {
+                await pgClient.query('ROLLBACK');
                 console.log(`Note for factory ${factory.factory_name}:`, err.message);
+            } finally {
+                pgClient.release();
             }
         }
 
-        await gateway.disconnect();
-
         res.status(200).json({ 
             success: true,
-            message: 'Database seeded successfully via blockchain (CouchDB)!',
+            message: 'Database seeded successfully!',
             note: 'Sample factories created with authentication for testing.',
-            testCredentials: createdFactories.length > 0 ? createdFactories : [
-                { email: 'demo@solar.com', password: 'Demo1234' },
-                { email: 'demo@wind.com', password: 'Demo1234' }
-            ]
+            testCredentials: createdFactories
         });
 
     } catch (error) {
@@ -1575,21 +2007,20 @@ app.use((err, req, res, next) => {
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
     console.log('   Energy Trading Network API');
-    console.log('   (Unified Mobile + Blockchain)');
+    console.log('   (PostgreSQL Backend Mode)');
     console.log('========================================');
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`Also accessible at http://127.0.0.1:${PORT}`);
     console.log('');
+    console.log('Mode:', USE_BLOCKCHAIN ? 'Hybrid (PostgreSQL + Blockchain)' : 'PostgreSQL Only');
+    console.log('');
     console.log('Databases:');
-    console.log(`  PostgreSQL: ${pgConnected ? '✅ Connected' : '⚠️  Not available (fallback to blockchain)'}`);
-    console.log('    - Credentials (email, password, fiscal matricule)');
-    console.log('    - Factory profiles (name, location, contact info)');
+    console.log(`  PostgreSQL: ${pgConnected ? '✅ Connected' : '⚠️  Not available'}`);
+    console.log('    - All factory data (credentials, profiles, trading data)');
+    console.log('    - Trades and offers');
     console.log('    - Login history & password resets');
     console.log('');
-    console.log('  Blockchain (CouchDB via Hyperledger Fabric):');
-    console.log('    - Trading data (energy balance, currency)');
-    console.log('    - Offers and trades (immutable ledger)');
-    console.log('    - Factory trading records');
+    console.log('  Blockchain:', USE_BLOCKCHAIN ? 'Enabled (optional replication)' : 'Simulated (fake transaction hashes)');
     console.log('');
     console.log('To start PostgreSQL: npm run db:start');
     console.log('');
@@ -1608,7 +2039,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('  GET  /factory/:id');
     console.log('  PUT  /factory/:id/energy');
     console.log('');
-    console.log('  FACTORIES (Blockchain format):');
+    console.log('  FACTORIES (API format):');
     console.log('  POST /api/factory/register');
     console.log('  GET  /api/factory/:factoryId');
     console.log('  GET  /api/factory/:factoryId/balance');
@@ -1633,7 +2064,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('  POST /trades');
     console.log('  POST /trades/:id/execute');
     console.log('');
-    console.log('  TRADES (Blockchain format):');
+    console.log('  TRADES (API format):');
     console.log('  POST /api/trade/create');
     console.log('  POST /api/trade/execute');
     console.log('  GET  /api/trade/:tradeId');
