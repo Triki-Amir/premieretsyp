@@ -18,6 +18,58 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
+// Simple in-memory rate limiter for authentication endpoints
+const rateLimitStore = new Map();
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_LOGIN_ATTEMPTS = 5; // Max attempts per window
+const MAX_SIGNUP_ATTEMPTS = 3; // Max signup attempts per window
+
+/**
+ * Rate limiter middleware for authentication endpoints
+ * @param {number} maxAttempts - Maximum attempts allowed in the window
+ * @returns {Function} Express middleware function
+ */
+function rateLimiter(maxAttempts) {
+    return (req, res, next) => {
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+        const key = `${req.path}:${clientIp}`;
+        const now = Date.now();
+        
+        // Get or create rate limit entry
+        let entry = rateLimitStore.get(key);
+        if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+            entry = { count: 0, windowStart: now };
+        }
+        
+        entry.count++;
+        rateLimitStore.set(key, entry);
+        
+        // Clean up old entries periodically
+        if (rateLimitStore.size > 10000) {
+            for (const [k, v] of rateLimitStore) {
+                if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) {
+                    rateLimitStore.delete(k);
+                }
+            }
+        }
+        
+        if (entry.count > maxAttempts) {
+            const retryAfter = Math.ceil((entry.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000);
+            res.setHeader('Retry-After', retryAfter);
+            return res.status(429).json({ 
+                error: 'Too many attempts. Please try again later.',
+                retryAfter: retryAfter
+            });
+        }
+        
+        next();
+    };
+}
+
+// Rate limiter instances for authentication
+const loginRateLimiter = rateLimiter(MAX_LOGIN_ATTEMPTS);
+const signupRateLimiter = rateLimiter(MAX_SIGNUP_ATTEMPTS);
+
 // PostgreSQL connection pool for credentials and non-essential data
 const pgPool = new Pool({
     host: process.env.PG_HOST || 'localhost',
@@ -670,10 +722,11 @@ app.get('/test', async (req, res) => {
 /**
  * Login Endpoint - Authenticate factory user
  * Uses PostgreSQL for credentials if available, falls back to blockchain
+ * Rate limited to prevent brute-force attacks
  * POST /login
  * Body: { email, password }
  */
-app.post('/login', async (req, res) => {
+app.post('/login', loginRateLimiter, async (req, res) => {
     console.log('Received login request with email:', req.body.email);
     try {
         const { email, password } = req.body;
@@ -846,10 +899,11 @@ app.post('/login', async (req, res) => {
  * Sign-Up Endpoint - Register new factory with authentication
  * Stores credentials in PostgreSQL, trading data in blockchain
  * Always stores password hash in blockchain as fallback for consistent authentication
+ * Rate limited to prevent abuse
  * POST /signup
  * Body: { factory_name, localisation, fiscal_matricule, energy_capacity, contact_info, energy_source, email, password }
  */
-app.post('/signup', async (req, res) => {
+app.post('/signup', signupRateLimiter, async (req, res) => {
     console.log('Received signup request with body:', req.body);
     try {
         const {
